@@ -2,21 +2,44 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pyvista as pv
 
 from core.octree import Voxel
 
 
-def show_voxels(voxels: list[Voxel], facets: np.ndarray | None = None) -> None:
-    """確定したVoxel群をPyVistaで表示する。facetsを渡すと元のSTLメッシュを半透明で重ね描画する。"""
+def show_voxels(
+    voxels: list[Voxel],
+    facets: np.ndarray | None = None,
+    fill_voxels: list[Voxel] | None = None,
+    cross_section: bool = False,
+) -> None:
+    """確定したVoxel群をPyVistaで表示する。
+
+    facetsを渡すと元のSTLメッシュを半透明で重ね描画する。
+    fill_voxelsを渡すと、ソリッド充塡で得られた内部セルをシェルとは別の色で重ね描画する。
+    cross_section=True の場合、ドラッグ可能な平面ウィジェットで断面を確認できるようにする
+    （ウィジェットでVoxel単位ごと綺麗に切断されるよう crinkle=True を使う）。
+    """
     plotter = pv.Plotter()
 
+    def add(mesh: pv.DataSet, **kwargs: Any) -> None:
+        if cross_section:
+            # pyvistaの内部フォワーディング実装の型スタブの都合でmypyが誤検知するため無視する。
+            plotter.add_mesh_clip_plane(mesh, normal="x", crinkle=True, **kwargs)  # type: ignore[arg-type]
+        else:
+            plotter.add_mesh(mesh, **kwargs)
+
     if voxels:
-        plotter.add_mesh(_voxels_to_mesh(voxels), color="orange", opacity=0.5, show_edges=True)
+        add(_voxels_to_mesh(voxels), color="orange", opacity=0.5, show_edges=True)
+
+    if fill_voxels:
+        add(_voxels_to_mesh(fill_voxels), color="green", opacity=0.6, show_edges=True)
 
     if facets is not None and len(facets) > 0:
-        plotter.add_mesh(_facets_to_polydata(facets), color="lightblue", opacity=0.3)
+        add(_facets_to_polydata(facets), color="lightblue", opacity=0.3)
 
     plotter.show()
 

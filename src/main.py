@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
-from core.octree import build_voxels
+from core.octree import build_voxels, make_cubic_bbox
+from core.solid_fill import fill_solid
 from core.stl_loader import load_stl
 from core.visualize import show_voxels
 
@@ -24,6 +25,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="ルートのbboxを最大辺に合わせた立方体に拡張してから分割する（軸ごとの分解能偏りを防ぐ）",
     )
+    parser.add_argument(
+        "--solid-fill",
+        action="store_true",
+        help="外側からのフラッドフィル+パリティ判定で内部を充塡する（入れ子の空洞は空気のまま残す）",
+    )
+    parser.add_argument(
+        "--cross-section",
+        action="store_true",
+        help="ドラッグ可能な平面ウィジェットで断面を確認できるようにする",
+    )
     args = parser.parse_args(argv)
 
     facets, bbox_min, bbox_max = load_stl(args.stl_path)
@@ -34,8 +45,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"voxel_size: {args.voxel_size}")
     print(f"voxels (flag1): {len(voxels)}")
 
+    fill_voxels = None
+    if args.solid_fill:
+        fill_bbox_min, fill_bbox_max = bbox_min, bbox_max
+        if args.cubic_root:
+            fill_bbox_min, fill_bbox_max = make_cubic_bbox(bbox_min, bbox_max)
+        fill_voxels = fill_solid(voxels, fill_bbox_min, fill_bbox_max, args.voxel_size)
+        print(f"voxels (solid fill): {len(fill_voxels)}")
+
     if not args.no_visualize:
-        show_voxels(voxels, facets)
+        show_voxels(voxels, facets, fill_voxels=fill_voxels, cross_section=args.cross_section)
 
     return 0
 
