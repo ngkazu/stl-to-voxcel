@@ -24,14 +24,35 @@ class Voxel:
     max_corner: np.ndarray
 
 
+def make_cubic_bbox(bbox_min: np.ndarray, bbox_max: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """bboxの中心を保ったまま、最大辺の長さに合わせた立方体のbboxへ拡張する。
+
+    非立方体のbboxをそのままルートにすると、子孫Voxelも同じ縦横比の直方体になり
+    軸ごとの分解能が不均一になる（Known Limitations参照）。これを避けたい場合に使う。
+    """
+    bbox_min = np.asarray(bbox_min, dtype=np.float64)
+    bbox_max = np.asarray(bbox_max, dtype=np.float64)
+    center = (bbox_min + bbox_max) / 2.0
+    half_size = float((bbox_max - bbox_min).max()) / 2.0
+    return center - half_size, center + half_size
+
+
 def build_voxels(
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
     facets: np.ndarray,
     voxel_size: float,
     max_depth: int = MAX_OCTREE_DEPTH,
+    cubic_root: bool = False,
 ) -> list[Voxel]:
-    """STL全体のbboxを8分木で再帰分割し、確定(flag1)したVoxelのみを返す。"""
+    """STL全体のbboxを8分木で再帰分割し、確定(flag1)したVoxelのみを返す。
+
+    cubic_root=True の場合、ルートのbboxを最大辺に合わせた立方体に拡張してから分割する
+    （はみ出した領域はファセットと交差しないため、最初の判定で破棄されるだけで済む）。
+    """
+    if cubic_root:
+        bbox_min, bbox_max = make_cubic_bbox(bbox_min, bbox_max)
+
     result: list[Voxel] = []
     all_facet_indices = np.arange(len(facets))
     queue: deque[tuple[np.ndarray, np.ndarray, np.ndarray, int]] = deque()

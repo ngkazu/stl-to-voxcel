@@ -19,10 +19,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="PyVistaによる可視化を行わない",
     )
+    parser.add_argument(
+        "--cubic-root",
+        action="store_true",
+        help="ルートのbboxを最大辺に合わせた立方体に拡張してから分割する（軸ごとの分解能偏りを防ぐ）",
+    )
     args = parser.parse_args(argv)
 
     facets, bbox_min, bbox_max = load_stl(args.stl_path)
-    voxels = build_voxels(bbox_min, bbox_max, facets, args.voxel_size)
+    voxels = build_voxels(bbox_min, bbox_max, facets, args.voxel_size, cubic_root=args.cubic_root)
 
     print(f"facets: {len(facets)}")
     print(f"bbox: {bbox_min.tolist()} - {bbox_max.tolist()}")
