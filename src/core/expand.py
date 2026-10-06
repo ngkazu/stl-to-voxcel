@@ -1,12 +1,13 @@
-"""Voxel群の膨張処理と距離検証。
+"""Voxel群の膨張処理。
 
 STL表面からユーザー指定の距離以上離れていることを保証するための処理を行う。
 将来的には収縮（STL表面への密着）機能の追加も想定している。
 
-高速化のポイント:
-- KD-treeを使った近傍三角形検索で距離計算を高速化
-- ヒント半径を使った早期終了で不要な計算を削減
-- 距離不足の箇所だけを選択的に膨張（不要な膨張を回避）
+アルゴリズム:
+1. 占有セル（SHELL/INSIDE）に隣接する外部セルを8分木で生成
+2. 外部セルのdepthが占有セルと異なる場合、最小Voxelサイズまで分割
+3. 外部セルの頂点の距離を検証し、条件を満たすものだけOUTSIDEとして追加
+4. 必要に応じて繰り返す
 """
 
 from __future__ import annotations
@@ -16,8 +17,8 @@ import numpy as np
 from core.geometry import MeshDistanceCalculator
 from core.model import Cell, CellState, VoxelModel
 
-# 6方向の隣接オフセット
-_NEIGHBOR_OFFSETS_6 = np.array(
+# 6方向の隣接オフセット（単位ベクトル）
+_NEIGHBOR_DIRECTIONS = np.array(
     [
         [1, 0, 0],
         [-1, 0, 0],
@@ -26,46 +27,27 @@ _NEIGHBOR_OFFSETS_6 = np.array(
         [0, 0, 1],
         [0, 0, -1],
     ],
-    dtype=np.int32,
+    dtype=np.float64,
 )
-
-# 各方向に対応する面の4頂点オフセット（セル座標からの相対位置）
-# セルの min_corner を基準に、各面の4頂点を定義
-_FACE_VERTEX_OFFSETS = {
-    (1, 0, 0): np.array([[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]]),  # +X面
-    (-1, 0, 0): np.array([[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]]),  # -X面
-    (0, 1, 0): np.array([[0, 1, 0], [1, 1, 0], [1, 1, 1], [0, 1, 1]]),  # +Y面
-    (0, -1, 0): np.array([[0, 0, 0], [0, 0, 1], [1, 0, 1], [1, 0, 0]]),  # -Y面
-    (0, 0, 1): np.array([[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]]),  # +Z面
-    (0, 0, -1): np.array([[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]]),  # -Z面
-}
 
 
 def expand_model(
     model: VoxelModel,
     facets: np.ndarray,
     expand_distance: float,
-    cell_size: float,
+    min_cell_size: float,
     max_iterations: int = 100,
 ) -> None:
     """VoxelModelを膨張させ、OUTSIDEセルを追加する。
 
-    外殻頂点がSTL表面から expand_distance 以上離れることを保証する。
-    既に条件を満たしている場合は膨張しない。
-
-    **選択的膨張アルゴリズム:**
-    全体をモルフォロジー膨張するのではなく、距離不足の箇所だけを選択的に膨張する。
-    1. 外殻頂点の距離を計算
-    2. expand_distance 未満の頂点を持つセルを特定
-    3. それらのセルの隣接セル（未占有）だけを膨張候補にする
-    4. 候補セルの距離を検証し、条件を満たすものだけ追加
-    5. 条件を満たすまで繰り返す
+    占有セル（SHELL/INSIDE）に隣接する外部空間を8分木で生成し、
+    距離検証を通過したものだけOUTSIDEとして追加する。
 
     Args:
         model: VoxelModel（SHELL/INSIDEセルが登録済み）
         facets: 元STLの三角形群 (N, 3, 3)
         expand_distance: STL表面から離す距離
-        cell_size: 膨張セルのサイズ
+        min_cell_size: 最小セルサイズ（8分木分割の下限）
         max_iterations: 最大反復回数（無限ループ防止）
     """
     if expand_distance <= 0:
@@ -78,243 +60,337 @@ def expand_model(
     # KD-treeを使った距離計算器を準備
     dist_calc = MeshDistanceCalculator(facets)
 
-    # bboxを計算
-    all_min = np.min([c.min_corner for c in occupied_cells], axis=0)
-    all_max = np.max([c.max_corner for c in occupied_cells], axis=0)
+    # 占有セルの空間インデックスを構築（高速な隣接判定用）
+    # グリッドサイズはmin_cell_sizeを使用
+    occupied_index, grid_size = _build_spatial_index(occupied_cells, min_cell_size)
 
-    # 占有グリッドを作成（膨張分のパディングを確保）
-    occupancy, origin = _rasterize_cells(
-        occupied_cells, all_min, all_max, cell_size, expand_distance
-    )
-    original_occupancy = occupancy.copy()
-
-    # 反復的に選択的膨張を行う
+    # 反復的に膨張処理
     for iteration in range(max_iterations):
-        # 現在の外殻頂点を抽出
-        exterior_vertices, vertex_to_cells = _extract_exterior_vertices(
-            occupancy, origin, cell_size
+        # 現在の占有セルに隣接する外部セル候補を生成
+        candidates = _generate_adjacent_external_cells(
+            model, occupied_index, grid_size, min_cell_size
         )
-
-        if len(exterior_vertices) == 0:
-            break
-
-        # 距離を計算
-        distances = dist_calc.distances_batch_with_hint(exterior_vertices, expand_distance)
-
-        # 距離不足の頂点を特定
-        insufficient_mask = distances < expand_distance
-
-        if not np.any(insufficient_mask):
-            # 全ての頂点が条件を満たしている → 完了
-            break
-
-        # 距離不足の頂点を持つセルを特定
-        insufficient_cells = _get_cells_with_insufficient_vertices(
-            vertex_to_cells, insufficient_mask
-        )
-
-        if not insufficient_cells:
-            break
-
-        # それらのセルの隣接セル（未占有）を膨張候補として取得
-        candidates = _get_expansion_candidates(occupancy, insufficient_cells)
 
         if not candidates:
-            # 候補がない → これ以上膨張できない
             break
 
-        # 候補セルの全頂点の距離を検証
-        validated_candidates = _validate_candidates(
-            candidates, occupancy, origin, cell_size, dist_calc, expand_distance
-        )
+        # 距離検証
+        validated = _validate_cells_by_distance(candidates, dist_calc, expand_distance)
 
-        if not validated_candidates:
-            # 条件を満たす候補がない → これ以上膨張できない
+        if not validated:
             break
 
-        # 検証済み候補を占有グリッドに追加
-        for idx in validated_candidates:
-            occupancy[idx] = True
+        # 検証済みセルをOUTSIDEとして追加
+        for cell in validated:
+            cell.state = CellState.OUTSIDE
+            model.add_cell(cell)
+            # 空間インデックスに追加
+            _add_to_spatial_index(occupied_index, cell, grid_size)
 
-    # 新規追加されたセル（元のoccupancyにはなかったセル）をOUTSIDEとして追加
-    new_cells_mask = occupancy & ~original_occupancy
-    for idx in np.argwhere(new_cells_mask):
-        cell_origin = origin + idx * cell_size
-        cell = Cell(
-            origin=cell_origin,
-            size=cell_size,
-            depth=-1,  # 膨張セルはdepth不定
-            state=CellState.OUTSIDE,
-            facet_indices=None,
+    return
+
+
+def _build_spatial_index(
+    cells: list[Cell],
+    grid_size: float,
+) -> tuple[dict[tuple[int, int, int], list[Cell]], float]:
+    """セルの空間インデックスを構築する。
+
+    グリッドベースのインデックス。各グリッドセルに、その領域と重なるセルのリストを格納。
+
+    Returns:
+        (グリッドインデックス, グリッドサイズ)
+    """
+    index: dict[tuple[int, int, int], list[Cell]] = {}
+
+    for cell in cells:
+        # セルがカバーするグリッドセルを計算
+        min_grid = (
+            int(np.floor(cell.origin[0] / grid_size)),
+            int(np.floor(cell.origin[1] / grid_size)),
+            int(np.floor(cell.origin[2] / grid_size)),
         )
-        model.add_cell(cell)
+        max_grid = (
+            int(np.floor((cell.origin[0] + cell.size) / grid_size)),
+            int(np.floor((cell.origin[1] + cell.size) / grid_size)),
+            int(np.floor((cell.origin[2] + cell.size) / grid_size)),
+        )
+
+        for gx in range(min_grid[0], max_grid[0] + 1):
+            for gy in range(min_grid[1], max_grid[1] + 1):
+                for gz in range(min_grid[2], max_grid[2] + 1):
+                    key = (gx, gy, gz)
+                    if key not in index:
+                        index[key] = []
+                    index[key].append(cell)
+
+    return index, grid_size
 
 
-def _get_cells_with_insufficient_vertices(
-    vertex_to_cells: dict[int, list[tuple[int, int, int]]],
-    insufficient_mask: np.ndarray,
-) -> set[tuple[int, int, int]]:
-    """距離不足の頂点を持つセルのインデックスを取得する。"""
-    insufficient_cells: set[tuple[int, int, int]] = set()
+def _add_to_spatial_index(
+    index: dict[tuple[int, int, int], list[Cell]],
+    cell: Cell,
+    grid_size: float,
+) -> None:
+    """セルを空間インデックスに追加する。"""
+    min_grid = (
+        int(np.floor(cell.origin[0] / grid_size)),
+        int(np.floor(cell.origin[1] / grid_size)),
+        int(np.floor(cell.origin[2] / grid_size)),
+    )
+    max_grid = (
+        int(np.floor((cell.origin[0] + cell.size) / grid_size)),
+        int(np.floor((cell.origin[1] + cell.size) / grid_size)),
+        int(np.floor((cell.origin[2] + cell.size) / grid_size)),
+    )
 
-    insufficient_indices = np.where(insufficient_mask)[0]
-    for vidx in insufficient_indices:
-        if vidx in vertex_to_cells:
-            insufficient_cells.update(vertex_to_cells[vidx])
+    for gx in range(min_grid[0], max_grid[0] + 1):
+        for gy in range(min_grid[1], max_grid[1] + 1):
+            for gz in range(min_grid[2], max_grid[2] + 1):
+                key = (gx, gy, gz)
+                if key not in index:
+                    index[key] = []
+                index[key].append(cell)
 
-    return insufficient_cells
+
+def _is_position_overlapping_any(
+    index: dict[tuple[int, int, int], list[Cell]],
+    grid_size: float,
+    origin: np.ndarray,
+    size: float,
+    tolerance: float = 1e-9,
+) -> bool:
+    """指定した位置が既存の占有セルと重なるかチェックする。
+
+    グリッドインデックスを使って高速に判定する。
+    """
+    candidate_min = origin
+    candidate_max = origin + size
+
+    # 候補がカバーするグリッドセルを計算
+    min_grid = (
+        int(np.floor(origin[0] / grid_size)),
+        int(np.floor(origin[1] / grid_size)),
+        int(np.floor(origin[2] / grid_size)),
+    )
+    max_grid = (
+        int(np.floor((origin[0] + size) / grid_size)),
+        int(np.floor((origin[1] + size) / grid_size)),
+        int(np.floor((origin[2] + size) / grid_size)),
+    )
+
+    # 関連するグリッドセル内のセルだけチェック
+    checked: set[int] = set()  # セルのid()で重複チェック
+
+    for gx in range(min_grid[0], max_grid[0] + 1):
+        for gy in range(min_grid[1], max_grid[1] + 1):
+            for gz in range(min_grid[2], max_grid[2] + 1):
+                key = (gx, gy, gz)
+                if key not in index:
+                    continue
+
+                for cell in index[key]:
+                    cell_id = id(cell)
+                    if cell_id in checked:
+                        continue
+                    checked.add(cell_id)
+
+                    cell_min = cell.origin
+                    cell_max = cell.origin + cell.size
+
+                    # AABBの重なり判定
+                    if (
+                        candidate_min[0] < cell_max[0] - tolerance
+                        and candidate_max[0] > cell_min[0] + tolerance
+                        and candidate_min[1] < cell_max[1] - tolerance
+                        and candidate_max[1] > cell_min[1] + tolerance
+                        and candidate_min[2] < cell_max[2] - tolerance
+                        and candidate_max[2] > cell_min[2] + tolerance
+                    ):
+                        return True
+
+    return False
 
 
-def _get_expansion_candidates(
-    occupancy: np.ndarray,
-    source_cells: set[tuple[int, int, int]],
-) -> set[tuple[int, int, int]]:
-    """距離不足セルの隣接セル（未占有）を膨張候補として取得する。"""
-    shape = np.array(occupancy.shape)
-    candidates: set[tuple[int, int, int]] = set()
+def _generate_adjacent_external_cells(
+    model: VoxelModel,
+    occupied_index: dict[tuple[int, int, int], list[Cell]],
+    grid_size: float,
+    min_cell_size: float,
+) -> list[Cell]:
+    """占有セルに隣接する外部セル候補を生成する。
 
-    for cell_idx in source_cells:
-        cell_arr = np.array(cell_idx)
-        for offset in _NEIGHBOR_OFFSETS_6:
-            neighbor = cell_arr + offset
-            # 範囲外チェック
-            if np.any(neighbor < 0) or np.any(neighbor >= shape):
-                continue
-            neighbor_tuple = tuple(neighbor)
-            # 未占有セルだけが候補
-            if not occupancy[neighbor_tuple]:
-                candidates.add(neighbor_tuple)
+    占有セルのサイズが min_cell_size より大きい場合、
+    隣接する外部セルを min_cell_size まで分割して生成する。
+    """
+    candidates: list[Cell] = []
+    seen_positions: set[tuple[float, float, float, float]] = set()
+
+    occupied_cells = model.get_occupied_cells()
+
+    for cell in occupied_cells:
+        cell_size = cell.size
+
+        # 各方向の隣接位置を計算
+        for direction in _NEIGHBOR_DIRECTIONS:
+            neighbor_origin = cell.origin + direction * cell_size
+
+            # 隣接セルのサイズはmin_cell_sizeまで分割
+            if cell_size > min_cell_size * 1.5:
+                # 大きいセルの場合、min_cell_sizeのセルに分割
+                sub_cells = _subdivide_to_min_size(neighbor_origin, cell_size, min_cell_size)
+                for sub_origin, sub_size in sub_cells:
+                    # 元のセルに隣接している部分だけを候補にする
+                    if _is_adjacent_to_cell(sub_origin, sub_size, cell):
+                        _try_add_candidate(
+                            sub_origin,
+                            sub_size,
+                            occupied_index,
+                            grid_size,
+                            seen_positions,
+                            candidates,
+                        )
+            else:
+                # 同じサイズで隣接セルを生成
+                _try_add_candidate(
+                    neighbor_origin,
+                    cell_size,
+                    occupied_index,
+                    grid_size,
+                    seen_positions,
+                    candidates,
+                )
 
     return candidates
 
 
-def _validate_candidates(
-    candidates: set[tuple[int, int, int]],
-    occupancy: np.ndarray,
+def _try_add_candidate(
     origin: np.ndarray,
-    cell_size: float,
+    size: float,
+    occupied_index: dict[tuple[int, int, int], list[Cell]],
+    grid_size: float,
+    seen_positions: set[tuple[float, float, float, float]],
+    candidates: list[Cell],
+) -> None:
+    """候補セルを追加する（重複・既存占有チェック付き）。"""
+    key = (origin[0], origin[1], origin[2], size)
+
+    if key in seen_positions:
+        return
+
+    seen_positions.add(key)
+
+    # 既存の占有セルと重なっていないかチェック
+    if _is_position_overlapping_any(occupied_index, grid_size, origin, size):
+        return
+
+    cell = Cell(
+        origin=origin.copy(),
+        size=size,
+        depth=-1,  # 膨張セルはdepth不定
+        state=CellState.EMPTY,  # 後でOUTSIDEに変更
+        facet_indices=None,
+    )
+    candidates.append(cell)
+
+
+def _subdivide_to_min_size(
+    origin: np.ndarray,
+    size: float,
+    min_size: float,
+) -> list[tuple[np.ndarray, float]]:
+    """指定した領域をmin_sizeまで8分木で分割する。"""
+    result: list[tuple[np.ndarray, float]] = []
+
+    if size <= min_size * 1.5:
+        result.append((origin.copy(), size))
+        return result
+
+    # 8分割
+    half = size / 2.0
+    for ix in (0, 1):
+        for iy in (0, 1):
+            for iz in (0, 1):
+                child_origin = origin + np.array([ix * half, iy * half, iz * half])
+                result.extend(_subdivide_to_min_size(child_origin, half, min_size))
+
+    return result
+
+
+def _is_adjacent_to_cell(
+    origin: np.ndarray,
+    size: float,
+    cell: Cell,
+    tolerance: float = 1e-9,
+) -> bool:
+    """指定した領域がセルに隣接しているかチェックする。
+
+    面で接触している場合にTrueを返す。
+    """
+    min1 = origin
+    max1 = origin + size
+    min2 = cell.origin
+    max2 = cell.origin + cell.size
+
+    # 各軸方向で隣接判定
+    # X方向で隣接
+    x_adjacent = abs(max1[0] - min2[0]) < tolerance or abs(min1[0] - max2[0]) < tolerance
+    x_overlap = min1[0] < max2[0] - tolerance and max1[0] > min2[0] + tolerance
+
+    # Y方向で隣接
+    y_adjacent = abs(max1[1] - min2[1]) < tolerance or abs(min1[1] - max2[1]) < tolerance
+    y_overlap = min1[1] < max2[1] - tolerance and max1[1] > min2[1] + tolerance
+
+    # Z方向で隣接
+    z_adjacent = abs(max1[2] - min2[2]) < tolerance or abs(min1[2] - max2[2]) < tolerance
+    z_overlap = min1[2] < max2[2] - tolerance and max1[2] > min2[2] + tolerance
+
+    # 1軸で隣接し、他の2軸で重なっている場合に隣接
+    if x_adjacent and y_overlap and z_overlap:
+        return True
+    if y_adjacent and x_overlap and z_overlap:
+        return True
+    if z_adjacent and x_overlap and y_overlap:
+        return True
+
+    return False
+
+
+def _validate_cells_by_distance(
+    candidates: list[Cell],
     dist_calc: MeshDistanceCalculator,
     expand_distance: float,
-) -> list[tuple[int, int, int]]:
-    """候補セルを追加した場合に、新たに露出する頂点の距離を検証する。
+) -> list[Cell]:
+    """候補セルの頂点の距離を検証し、条件を満たすものだけ返す。
 
-    候補セルを追加すると、そのセルの外殻面の頂点が新たに露出する。
-    それらの頂点がexpand_distance以上の距離を持つ場合のみ、候補を承認する。
+    セルの全8頂点がexpand_distance以上の距離を持つ場合のみ承認する。
     """
-    validated: list[tuple[int, int, int]] = []
-    shape = np.array(occupancy.shape)
+    validated: list[Cell] = []
 
-    for candidate in candidates:
-        candidate_arr = np.array(candidate)
+    for cell in candidates:
+        vertices = _get_cell_vertices(cell)
+        distances = dist_calc.distances_batch_with_hint(vertices, expand_distance)
 
-        # 候補セルを追加した場合に新たに露出する頂点を計算
-        new_exterior_vertices = []
-
-        for offset in _NEIGHBOR_OFFSETS_6:
-            neighbor = candidate_arr + offset
-            direction = tuple(offset)
-
-            # 隣接セルが範囲外または未占有の場合、その面が外殻になる
-            is_exterior = (
-                np.any(neighbor < 0) or np.any(neighbor >= shape) or not occupancy[tuple(neighbor)]
-            )
-
-            if is_exterior:
-                face_offsets = _FACE_VERTEX_OFFSETS[direction]
-                for vertex_offset in face_offsets:
-                    vertex_pos = origin + (candidate_arr + vertex_offset) * cell_size
-                    new_exterior_vertices.append(vertex_pos)
-
-        if not new_exterior_vertices:
-            # 外殻面がない（完全に囲まれている）場合は追加OK
-            validated.append(candidate)
-            continue
-
-        # 重複を除去
-        vertices_array = np.array(new_exterior_vertices)
-        unique_vertices = np.unique(vertices_array, axis=0)
-
-        # 距離を計算
-        distances = dist_calc.distances_batch_with_hint(unique_vertices, expand_distance)
-
-        # 全ての頂点がexpand_distance以上なら承認
         if np.all(distances >= expand_distance):
-            validated.append(candidate)
+            validated.append(cell)
 
     return validated
 
 
-def _rasterize_cells(
-    cells: list[Cell],
-    bbox_min: np.ndarray,
-    bbox_max: np.ndarray,
-    cell_size: float,
-    expand_distance: float = 0.0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """セル群を一様格子のbool占有グリッドにラスタライズする。
-
-    expand_distance が指定された場合、膨張処理で必要な領域を確保するため
-    その分のパディングを追加する。
-    """
-    # パディング: 最低1セル + 膨張距離分
-    padding = cell_size + expand_distance
-    bbox_min = np.asarray(bbox_min, dtype=np.float64) - padding
-    bbox_max = np.asarray(bbox_max, dtype=np.float64) + padding
-    shape = np.maximum(np.ceil((bbox_max - bbox_min) / cell_size).astype(int), 1)
-    occupancy = np.zeros(tuple(shape), dtype=bool)
-
-    for cell in cells:
-        lo = np.clip(np.floor((cell.min_corner - bbox_min) / cell_size).astype(int), 0, shape - 1)
-        hi = np.clip(np.ceil((cell.max_corner - bbox_min) / cell_size).astype(int), 1, shape)
-        occupancy[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]] = True
-
-    return occupancy, bbox_min
-
-
-def _extract_exterior_vertices(
-    occupancy: np.ndarray,
-    origin: np.ndarray,
-    cell_size: float,
-) -> tuple[np.ndarray, dict[int, list[tuple[int, int, int]]]]:
-    """外殻に露出している頂点を抽出する。"""
-    shape = np.array(occupancy.shape)
-
-    vertex_coord_to_info: dict[tuple[float, ...], tuple[int, list[tuple[int, int, int]]]] = {}
-    next_vertex_idx = 0
-
-    occupied_indices = np.argwhere(occupancy)
-
-    for idx in occupied_indices:
-        ix, iy, iz = idx
-
-        for offset in _NEIGHBOR_OFFSETS_6:
-            neighbor = idx + offset
-            direction = tuple(offset)
-
-            is_exterior = (
-                np.any(neighbor < 0) or np.any(neighbor >= shape) or not occupancy[tuple(neighbor)]
-            )
-
-            if is_exterior:
-                face_offsets = _FACE_VERTEX_OFFSETS[direction]
-                for vertex_offset in face_offsets:
-                    vertex_pos = origin + (idx + vertex_offset) * cell_size
-                    vertex_key = tuple(vertex_pos)
-
-                    if vertex_key not in vertex_coord_to_info:
-                        vertex_coord_to_info[vertex_key] = (next_vertex_idx, [])
-                        next_vertex_idx += 1
-
-                    vertex_coord_to_info[vertex_key][1].append((ix, iy, iz))
-
-    if not vertex_coord_to_info:
-        return np.array([]).reshape(0, 3), {}
-
-    vertices = np.zeros((len(vertex_coord_to_info), 3), dtype=np.float64)
-    vertex_to_cells: dict[int, list[tuple[int, int, int]]] = {}
-
-    for coord, (vidx, cells) in vertex_coord_to_info.items():
-        vertices[vidx] = coord
-        vertex_to_cells[vidx] = cells
-
-    return vertices, vertex_to_cells
+def _get_cell_vertices(cell: Cell) -> np.ndarray:
+    """セルの8頂点を取得する。"""
+    origin = cell.origin
+    size = cell.size
+    vertices = np.array(
+        [
+            origin + [0, 0, 0],
+            origin + [size, 0, 0],
+            origin + [0, size, 0],
+            origin + [size, size, 0],
+            origin + [0, 0, size],
+            origin + [size, 0, size],
+            origin + [0, size, size],
+            origin + [size, size, size],
+        ]
+    )
+    return vertices
