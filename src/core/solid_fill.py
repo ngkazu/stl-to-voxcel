@@ -13,46 +13,59 @@ from collections import deque
 
 import numpy as np
 
-from core.octree import Voxel
+from core.model import Cell, CellState, VoxelModel
 
 _UNLABELED = -1
 _NEIGHBOR_OFFSETS = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
 
 
-def fill_solid(
-    voxels: list[Voxel],
-    bbox_min: np.ndarray,
-    bbox_max: np.ndarray,
-    cell_size: float,
-) -> list[Voxel]:
-    """シェルVoxel群から、奇数パリティ（材質）と判定されたセルのVoxelを新たに生成して返す。
+def fill_solid(model: VoxelModel, cell_size: float) -> None:
+    """シェルVoxelから内部充填を行い、INSIDEセルをmodelに追加する。
 
-    戻り値には元のシェルVoxelは含まない（内部充填セルのみ）。偶数パリティ（入れ子の空洞）は
-    空気として扱われ、結果に含まれない。
+    元のシェルセルはそのまま残り、内部充填セルがINSIDEとして追加される。
+    偶数パリティ（入れ子の空洞）は空気として扱われ、追加されない。
+
+    Args:
+        model: VoxelModel（SHELLセルが登録済み）
+        cell_size: 充填セルのサイズ
     """
-    occupancy, origin = _rasterize_shell(voxels, bbox_min, bbox_max, cell_size)
+    shell_cells = model.get_shell_cells()
+    if not shell_cells:
+        return
+
+    # bboxを計算
+    all_min = np.min([c.min_corner for c in shell_cells], axis=0)
+    all_max = np.max([c.max_corner for c in shell_cells], axis=0)
+
+    occupancy, origin = _rasterize_shell(shell_cells, all_min, all_max, cell_size)
     region_labels, num_regions = _label_empty_regions(occupancy)
     if num_regions == 0:
-        return []
+        return
 
     outside_region = _find_outside_region(region_labels)
     parity = _compute_region_parity(occupancy, region_labels, num_regions, outside_region)
     solid_regions = {region for region, p in parity.items() if p % 2 == 1}
 
-    fill_voxels: list[Voxel] = []
+    # INSIDEセルを追加
     for index in np.argwhere(np.isin(region_labels, list(solid_regions))):
-        cell_min = origin + index * cell_size
-        fill_voxels.append(Voxel(cell_min, cell_min + cell_size))
-    return fill_voxels
+        cell_origin = origin + index * cell_size
+        cell = Cell(
+            origin=cell_origin,
+            size=cell_size,
+            depth=-1,  # 充填セルはdepth不定（8分木由来ではない）
+            state=CellState.INSIDE,
+            facet_indices=None,
+        )
+        model.add_cell(cell)
 
 
 def _rasterize_shell(
-    voxels: list[Voxel],
+    cells: list[Cell],
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
     cell_size: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """シェルVoxel群を、一様格子のbool占有グリッド（True=シェル）にラスタライズする。
+    """シェルセル群を、一様格子のbool占有グリッド（True=シェル）にラスタライズする。
 
     bboxの外周に1セル分のpaddingを追加する。「外側」判定はグリッド境界面の空セルを
     頼りにしており、bboxがモデルにぴったり密着している（余白がない）とそれが成立しないため。
@@ -62,9 +75,9 @@ def _rasterize_shell(
     shape = np.maximum(np.ceil((bbox_max - bbox_min) / cell_size).astype(int), 1)
     occupancy = np.zeros(tuple(shape), dtype=bool)
 
-    for voxel in voxels:
-        lo = np.clip(np.floor((voxel.min_corner - bbox_min) / cell_size).astype(int), 0, shape - 1)
-        hi = np.clip(np.ceil((voxel.max_corner - bbox_min) / cell_size).astype(int), 1, shape)
+    for cell in cells:
+        lo = np.clip(np.floor((cell.min_corner - bbox_min) / cell_size).astype(int), 0, shape - 1)
+        hi = np.clip(np.ceil((cell.max_corner - bbox_min) / cell_size).astype(int), 1, shape)
         occupancy[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]] = True
 
     return occupancy, bbox_min
@@ -171,23 +184,24 @@ def _compute_region_parity(
     return parity
 
 
-def rasterize_voxels(
-    voxels: list[Voxel],
-    bbox_min: np.ndarray,
-    bbox_max: np.ndarray,
+def rasterize_model(
+    model: VoxelModel,
     cell_size: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Voxel群を一様格子のbool占有グリッドにラスタライズする（公開API）。
-
-    _rasterize_shell と同じ処理だが、expand モジュールなど外部から利用するために公開する。
+    """VoxelModelを一様格子のbool占有グリッドにラスタライズする。
 
     Args:
-        voxels: Voxelのリスト
-        bbox_min: バウンディングボックスの最小座標
-        bbox_max: バウンディングボックスの最大座標
+        model: VoxelModel
         cell_size: セルサイズ
 
     Returns:
         (占有グリッド, グリッド原点座標)
     """
-    return _rasterize_shell(voxels, bbox_min, bbox_max, cell_size)
+    occupied_cells = model.get_occupied_cells()
+    if not occupied_cells:
+        return np.zeros((1, 1, 1), dtype=bool), model.origin.copy()
+
+    all_min = np.min([c.min_corner for c in occupied_cells], axis=0)
+    all_max = np.max([c.max_corner for c in occupied_cells], axis=0)
+
+    return _rasterize_shell(occupied_cells, all_min, all_max, cell_size)

@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import sys
 
-from core.expand import expand_and_validate, occupancy_to_voxels
-from core.octree import build_voxels, make_cubic_bbox
-from core.solid_fill import fill_solid, rasterize_voxels
+from core.expand import expand_model
+from core.octree import build_voxel_model
+from core.solid_fill import fill_solid
 from core.stl_loader import load_stl
-from core.visualize import show_voxels
+from core.visualize import show_model
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,54 +44,35 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # STL読み込み
     facets, bbox_min, bbox_max = load_stl(args.stl_path)
     print(f"facets: {len(facets)}")
     print(f"bbox: {bbox_min.tolist()} - {bbox_max.tolist()}")
 
-    voxels = build_voxels(bbox_min, bbox_max, facets, args.voxel_size, cubic_root=args.cubic_root)
-
+    # 8分木でVoxelModel構築（SHELLセル）
+    model = build_voxel_model(
+        bbox_min, bbox_max, facets, args.voxel_size, cubic_root=args.cubic_root
+    )
     print(f"voxel_size: {args.voxel_size}")
-    print(f"voxels (shell): {len(voxels)}")
+    print(f"cells (shell): {model.shell_count}")
 
-    # 内部充填用のbbox
-    fill_bbox_min, fill_bbox_max = bbox_min, bbox_max
-    if args.cubic_root:
-        fill_bbox_min, fill_bbox_max = make_cubic_bbox(bbox_min, bbox_max)
-
-    fill_voxels = None
-    expanded_voxels = None
-
+    # 内部充填
     if args.solid_fill or args.expand is not None:
-        # solid_fillまたはexpandが指定された場合は内部充填を行う
-        fill_voxels = fill_solid(voxels, fill_bbox_min, fill_bbox_max, args.voxel_size)
-        print(f"voxels (solid fill): {len(fill_voxels)}")
+        fill_solid(model, args.voxel_size)
+        print(f"cells (inside): {model.inside_count}")
 
+        # 膨張処理
         if args.expand is not None:
-            # 膨張処理
             print(f"expand distance: {args.expand}")
+            expand_model(model, facets, args.expand, args.voxel_size)
+            print(f"cells (outside): {model.outside_count}")
 
-            # Shell + Fill を結合してoccupancyグリッドを作成
-            all_voxels = voxels + fill_voxels
-            occupancy, origin = rasterize_voxels(
-                all_voxels, fill_bbox_min, fill_bbox_max, args.voxel_size
-            )
-            print(f"occupancy grid shape: {occupancy.shape}")
+    # 統計表示
+    print(f"total cells: {model.cell_count}")
 
-            # 膨張 + 距離検証
-            validated_occupancy = expand_and_validate(
-                all_voxels, occupancy, origin, args.voxel_size, facets, args.expand
-            )
-
-            # Voxelリストに変換
-            expanded_voxels = occupancy_to_voxels(validated_occupancy, origin, args.voxel_size)
-            print(f"voxels (expanded & validated): {len(expanded_voxels)}")
-
+    # 可視化
     if not args.no_visualize:
-        if expanded_voxels is not None:
-            # 膨張結果を表示（元のshell/fillは非表示）
-            show_voxels([], facets, fill_voxels=expanded_voxels, cross_section=args.cross_section)
-        else:
-            show_voxels(voxels, facets, fill_voxels=fill_voxels, cross_section=args.cross_section)
+        show_model(model, facets, cross_section=args.cross_section)
 
     return 0
 

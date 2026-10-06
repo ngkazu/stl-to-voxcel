@@ -7,19 +7,21 @@ from typing import Any
 import numpy as np
 import pyvista as pv
 
-from core.octree import Voxel
+from core.model import Cell, CellState, VoxelModel
 
 
-def show_voxels(
-    voxels: list[Voxel],
+def show_model(
+    model: VoxelModel,
     facets: np.ndarray | None = None,
-    fill_voxels: list[Voxel] | None = None,
     cross_section: bool = False,
 ) -> None:
-    """確定したVoxel群をPyVistaで表示する。
+    """VoxelModelをPyVistaで表示する。
+
+    - SHELLセル: オレンジ
+    - INSIDEセル: 緑
+    - OUTSIDEセル: 青
 
     facetsを渡すと元のSTLメッシュを半透明で重ね描画する。
-    fill_voxelsを渡すと、ソリッド充塡で得られた内部セルをシェルとは別の色で重ね描画する。
     cross_section=True の場合、ドラッグ可能な平面ウィジェットで断面を確認できるようにする
     （ウィジェットでVoxel単位ごと綺麗に切断されるよう crinkle=True を使う）。
     """
@@ -27,19 +29,26 @@ def show_voxels(
 
     def add(mesh: pv.DataSet, **kwargs: Any) -> pv.Actor:
         if cross_section:
-            # pyvistaの内部フォワーディング実装の型スタブの都合でmypyが誤検知するため無視する。
             return plotter.add_mesh_clip_plane(mesh, normal="x", crinkle=True, **kwargs)  # type: ignore[arg-type]
         return plotter.add_mesh(mesh, **kwargs)
 
     sliders: list[tuple[pv.Actor, str, float]] = []
 
-    if voxels:
-        actor = add(_voxels_to_mesh(voxels), color="orange", opacity=0.5, show_edges=True)
+    shell_cells = model.get_shell_cells()
+    inside_cells = model.get_inside_cells()
+    outside_cells = model.get_outside_cells()
+
+    if shell_cells:
+        actor = add(_cells_to_mesh(shell_cells), color="orange", opacity=0.5, show_edges=True)
         sliders.append((actor, "Shell opacity", 0.5))
 
-    if fill_voxels:
-        actor = add(_voxels_to_mesh(fill_voxels), color="green", opacity=0.6, show_edges=True)
-        sliders.append((actor, "Fill opacity", 0.6))
+    if inside_cells:
+        actor = add(_cells_to_mesh(inside_cells), color="green", opacity=0.6, show_edges=True)
+        sliders.append((actor, "Inside opacity", 0.6))
+
+    if outside_cells:
+        actor = add(_cells_to_mesh(outside_cells), color="blue", opacity=0.4, show_edges=True)
+        sliders.append((actor, "Outside opacity", 0.4))
 
     if facets is not None and len(facets) > 0:
         actor = add(_facets_to_polydata(facets), color="lightblue", opacity=0.3)
@@ -53,13 +62,13 @@ def show_voxels(
 def _add_opacity_sliders(plotter: pv.Plotter, sliders: list[tuple[pv.Actor, str, float]]) -> None:
     """各レイヤーのActorごとに透明度スライダーを追加し、ドラッグでリアルタイムに変更できるようにする。"""
     for i, (actor, title, initial_opacity) in enumerate(sliders):
-        top = 0.9 - 0.15 * i  # スライダーが重ならないよう縦方向にずらして配置する
+        top = 0.9 - 0.15 * i
 
         def callback(value: float, actor: pv.Actor = actor) -> None:
             actor.prop.opacity = value
 
         plotter.add_slider_widget(
-            callback,  # type: ignore[arg-type]  # pyvistaの型スタブの都合でmypyが誤検知する
+            callback,  # type: ignore[arg-type]
             rng=[0.0, 1.0],
             value=initial_opacity,
             title=title,
@@ -68,20 +77,20 @@ def _add_opacity_sliders(plotter: pv.Plotter, sliders: list[tuple[pv.Actor, str,
         )
 
 
-def _voxels_to_mesh(voxels: list[Voxel]) -> pv.UnstructuredGrid:
-    """Voxelごとのboxを1つのメッシュに統合する（add_meshをVoxel数回呼ぶと描画が極端に遅くなるため）。"""
+def _cells_to_mesh(cells: list[Cell]) -> pv.UnstructuredGrid:
+    """Cellごとのboxを1つのメッシュに統合する。"""
     boxes = [
         pv.Box(
             bounds=(
-                voxel.min_corner[0],
-                voxel.max_corner[0],
-                voxel.min_corner[1],
-                voxel.max_corner[1],
-                voxel.min_corner[2],
-                voxel.max_corner[2],
+                cell.min_corner[0],
+                cell.max_corner[0],
+                cell.min_corner[1],
+                cell.max_corner[1],
+                cell.min_corner[2],
+                cell.max_corner[2],
             )
         )
-        for voxel in voxels
+        for cell in cells
     ]
     return pv.MultiBlock(boxes).combine()
 
