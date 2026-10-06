@@ -6,12 +6,12 @@ STL表面からユーザー指定の距離以上離れていることを保証�
 高速化のポイント:
 - KD-treeを使った近傍三角形検索で距離計算を高速化
 - ヒント半径を使った早期終了で不要な計算を削減
+- 距離不足の箇所だけを選択的に膨張（不要な膨張を回避）
 """
 
 from __future__ import annotations
 
 import numpy as np
-from scipy import ndimage
 
 from core.geometry import MeshDistanceCalculator
 from core.model import Cell, CellState, VoxelModel
@@ -46,17 +46,27 @@ def expand_model(
     facets: np.ndarray,
     expand_distance: float,
     cell_size: float,
+    max_iterations: int = 100,
 ) -> None:
     """VoxelModelを膨張させ、OUTSIDEセルを追加する。
 
     外殻頂点がSTL表面から expand_distance 以上離れることを保証する。
     既に条件を満たしている場合は膨張しない。
 
+    **選択的膨張アルゴリズム:**
+    全体をモルフォロジー膨張するのではなく、距離不足の箇所だけを選択的に膨張する。
+    1. 外殻頂点の距離を計算
+    2. expand_distance 未満の頂点を持つセルを特定
+    3. それらのセルの隣接セル（未占有）だけを膨張候補にする
+    4. 候補セルの距離を検証し、条件を満たすものだけ追加
+    5. 条件を満たすまで繰り返す
+
     Args:
         model: VoxelModel（SHELL/INSIDEセルが登録済み）
         facets: 元STLの三角形群 (N, 3, 3)
         expand_distance: STL表面から離す距離
         cell_size: 膨張セルのサイズ
+        max_iterations: 最大反復回数（無限ループ防止）
     """
     if expand_distance <= 0:
         return
@@ -78,46 +88,56 @@ def expand_model(
     )
     original_occupancy = occupancy.copy()
 
-    # 現在の外殻頂点の最小距離を計算
-    exterior_vertices, vertex_to_cells = _extract_exterior_vertices(occupancy, origin, cell_size)
+    # 反復的に選択的膨張を行う
+    for iteration in range(max_iterations):
+        # 現在の外殻頂点を抽出
+        exterior_vertices, vertex_to_cells = _extract_exterior_vertices(
+            occupancy, origin, cell_size
+        )
 
-    if len(exterior_vertices) == 0:
-        return
+        if len(exterior_vertices) == 0:
+            break
 
-    distances = dist_calc.distances_batch_with_hint(exterior_vertices, expand_distance)
-    min_distance = float(np.min(distances))
+        # 距離を計算
+        distances = dist_calc.distances_batch_with_hint(exterior_vertices, expand_distance)
 
-    # 既に条件を満たしている場合は膨張不要
-    if min_distance >= expand_distance:
-        return
+        # 距離不足の頂点を特定
+        insufficient_mask = distances < expand_distance
 
-    # 必要な膨張回数: 不足分をカバーするのに必要なセル数
-    shortage = expand_distance - min_distance
-    expand_iterations = int(np.ceil(shortage / cell_size))
+        if not np.any(insufficient_mask):
+            # 全ての頂点が条件を満たしている → 完了
+            break
 
-    if expand_iterations <= 0:
-        return
+        # 距離不足の頂点を持つセルを特定
+        insufficient_cells = _get_cells_with_insufficient_vertices(
+            vertex_to_cells, insufficient_mask
+        )
 
-    # 膨張処理
-    expanded = occupancy
-    for _ in range(expand_iterations):
-        expanded = _dilate_once(expanded)
+        if not insufficient_cells:
+            break
 
-    # 膨張後の外殻頂点を抽出
-    exterior_vertices, vertex_to_cells = _extract_exterior_vertices(expanded, origin, cell_size)
+        # それらのセルの隣接セル（未占有）を膨張候補として取得
+        candidates = _get_expansion_candidates(occupancy, insufficient_cells)
 
-    if len(exterior_vertices) == 0:
-        return
+        if not candidates:
+            # 候補がない → これ以上膨張できない
+            break
 
-    # 距離計算
-    distances = dist_calc.distances_batch_with_hint(exterior_vertices, expand_distance)
+        # 候補セルの全頂点の距離を検証
+        validated_candidates = _validate_candidates(
+            candidates, occupancy, origin, cell_size, dist_calc, expand_distance
+        )
 
-    # 距離不足の頂点を持つセルを除外
-    insufficient_mask = distances < expand_distance
-    validated = _filter_by_distance(expanded, exterior_vertices, vertex_to_cells, insufficient_mask)
+        if not validated_candidates:
+            # 条件を満たす候補がない → これ以上膨張できない
+            break
+
+        # 検証済み候補を占有グリッドに追加
+        for idx in validated_candidates:
+            occupancy[idx] = True
 
     # 新規追加されたセル（元のoccupancyにはなかったセル）をOUTSIDEとして追加
-    new_cells_mask = validated & ~original_occupancy
+    new_cells_mask = occupancy & ~original_occupancy
     for idx in np.argwhere(new_cells_mask):
         cell_origin = origin + idx * cell_size
         cell = Cell(
@@ -128,6 +148,100 @@ def expand_model(
             facet_indices=None,
         )
         model.add_cell(cell)
+
+
+def _get_cells_with_insufficient_vertices(
+    vertex_to_cells: dict[int, list[tuple[int, int, int]]],
+    insufficient_mask: np.ndarray,
+) -> set[tuple[int, int, int]]:
+    """距離不足の頂点を持つセルのインデックスを取得する。"""
+    insufficient_cells: set[tuple[int, int, int]] = set()
+
+    insufficient_indices = np.where(insufficient_mask)[0]
+    for vidx in insufficient_indices:
+        if vidx in vertex_to_cells:
+            insufficient_cells.update(vertex_to_cells[vidx])
+
+    return insufficient_cells
+
+
+def _get_expansion_candidates(
+    occupancy: np.ndarray,
+    source_cells: set[tuple[int, int, int]],
+) -> set[tuple[int, int, int]]:
+    """距離不足セルの隣接セル（未占有）を膨張候補として取得する。"""
+    shape = np.array(occupancy.shape)
+    candidates: set[tuple[int, int, int]] = set()
+
+    for cell_idx in source_cells:
+        cell_arr = np.array(cell_idx)
+        for offset in _NEIGHBOR_OFFSETS_6:
+            neighbor = cell_arr + offset
+            # 範囲外チェック
+            if np.any(neighbor < 0) or np.any(neighbor >= shape):
+                continue
+            neighbor_tuple = tuple(neighbor)
+            # 未占有セルだけが候補
+            if not occupancy[neighbor_tuple]:
+                candidates.add(neighbor_tuple)
+
+    return candidates
+
+
+def _validate_candidates(
+    candidates: set[tuple[int, int, int]],
+    occupancy: np.ndarray,
+    origin: np.ndarray,
+    cell_size: float,
+    dist_calc: MeshDistanceCalculator,
+    expand_distance: float,
+) -> list[tuple[int, int, int]]:
+    """候補セルを追加した場合に、新たに露出する頂点の距離を検証する。
+
+    候補セルを追加すると、そのセルの外殻面の頂点が新たに露出する。
+    それらの頂点がexpand_distance以上の距離を持つ場合のみ、候補を承認する。
+    """
+    validated: list[tuple[int, int, int]] = []
+    shape = np.array(occupancy.shape)
+
+    for candidate in candidates:
+        candidate_arr = np.array(candidate)
+
+        # 候補セルを追加した場合に新たに露出する頂点を計算
+        new_exterior_vertices = []
+
+        for offset in _NEIGHBOR_OFFSETS_6:
+            neighbor = candidate_arr + offset
+            direction = tuple(offset)
+
+            # 隣接セルが範囲外または未占有の場合、その面が外殻になる
+            is_exterior = (
+                np.any(neighbor < 0) or np.any(neighbor >= shape) or not occupancy[tuple(neighbor)]
+            )
+
+            if is_exterior:
+                face_offsets = _FACE_VERTEX_OFFSETS[direction]
+                for vertex_offset in face_offsets:
+                    vertex_pos = origin + (candidate_arr + vertex_offset) * cell_size
+                    new_exterior_vertices.append(vertex_pos)
+
+        if not new_exterior_vertices:
+            # 外殻面がない（完全に囲まれている）場合は追加OK
+            validated.append(candidate)
+            continue
+
+        # 重複を除去
+        vertices_array = np.array(new_exterior_vertices)
+        unique_vertices = np.unique(vertices_array, axis=0)
+
+        # 距離を計算
+        distances = dist_calc.distances_batch_with_hint(unique_vertices, expand_distance)
+
+        # 全ての頂点がexpand_distance以上なら承認
+        if np.all(distances >= expand_distance):
+            validated.append(candidate)
+
+    return validated
 
 
 def _rasterize_cells(
@@ -155,12 +269,6 @@ def _rasterize_cells(
         occupancy[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]] = True
 
     return occupancy, bbox_min
-
-
-def _dilate_once(occupancy: np.ndarray) -> np.ndarray:
-    """占有グリッドを1回だけモルフォロジー膨張させる。"""
-    struct = ndimage.generate_binary_structure(3, 1)
-    return ndimage.binary_dilation(occupancy, structure=struct, iterations=1)
 
 
 def _extract_exterior_vertices(
@@ -210,25 +318,3 @@ def _extract_exterior_vertices(
         vertex_to_cells[vidx] = cells
 
     return vertices, vertex_to_cells
-
-
-def _filter_by_distance(
-    occupancy: np.ndarray,
-    vertices: np.ndarray,
-    vertex_to_cells: dict[int, list[tuple[int, int, int]]],
-    insufficient_mask: np.ndarray,
-) -> np.ndarray:
-    """距離が不足している頂点を持つセルを除外する。"""
-    result = occupancy.copy()
-
-    cells_to_remove: set[tuple[int, int, int]] = set()
-
-    insufficient_indices = np.where(insufficient_mask)[0]
-    for vidx in insufficient_indices:
-        if vidx in vertex_to_cells:
-            cells_to_remove.update(vertex_to_cells[vidx])
-
-    for cell in cells_to_remove:
-        result[cell] = False
-
-    return result
