@@ -38,10 +38,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     facets, bbox_min, bbox_max = load_stl(args.stl_path)
-    voxels = build_voxels(bbox_min, bbox_max, facets, args.voxel_size, cubic_root=args.cubic_root)
-
     print(f"facets: {len(facets)}")
     print(f"bbox: {bbox_min.tolist()} - {bbox_max.tolist()}")
+
+    voxels = build_voxels(bbox_min, bbox_max, facets, args.voxel_size, cubic_root=args.cubic_root)
+
     print(f"voxel_size: {args.voxel_size}")
     print(f"voxels (flag1): {len(voxels)}")
 

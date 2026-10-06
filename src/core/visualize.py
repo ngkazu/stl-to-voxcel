@@ -25,23 +25,47 @@ def show_voxels(
     """
     plotter = pv.Plotter()
 
-    def add(mesh: pv.DataSet, **kwargs: Any) -> None:
+    def add(mesh: pv.DataSet, **kwargs: Any) -> pv.Actor:
         if cross_section:
             # pyvistaの内部フォワーディング実装の型スタブの都合でmypyが誤検知するため無視する。
-            plotter.add_mesh_clip_plane(mesh, normal="x", crinkle=True, **kwargs)  # type: ignore[arg-type]
-        else:
-            plotter.add_mesh(mesh, **kwargs)
+            return plotter.add_mesh_clip_plane(mesh, normal="x", crinkle=True, **kwargs)  # type: ignore[arg-type]
+        return plotter.add_mesh(mesh, **kwargs)
+
+    sliders: list[tuple[pv.Actor, str, float]] = []
 
     if voxels:
-        add(_voxels_to_mesh(voxels), color="orange", opacity=0.5, show_edges=True)
+        actor = add(_voxels_to_mesh(voxels), color="orange", opacity=0.5, show_edges=True)
+        sliders.append((actor, "Shell opacity", 0.5))
 
     if fill_voxels:
-        add(_voxels_to_mesh(fill_voxels), color="green", opacity=0.6, show_edges=True)
+        actor = add(_voxels_to_mesh(fill_voxels), color="green", opacity=0.6, show_edges=True)
+        sliders.append((actor, "Fill opacity", 0.6))
 
     if facets is not None and len(facets) > 0:
-        add(_facets_to_polydata(facets), color="lightblue", opacity=0.3)
+        actor = add(_facets_to_polydata(facets), color="lightblue", opacity=0.3)
+        sliders.append((actor, "Mesh opacity", 0.3))
+
+    _add_opacity_sliders(plotter, sliders)
 
     plotter.show()
+
+
+def _add_opacity_sliders(plotter: pv.Plotter, sliders: list[tuple[pv.Actor, str, float]]) -> None:
+    """各レイヤーのActorごとに透明度スライダーを追加し、ドラッグでリアルタイムに変更できるようにする。"""
+    for i, (actor, title, initial_opacity) in enumerate(sliders):
+        top = 0.9 - 0.15 * i  # スライダーが重ならないよう縦方向にずらして配置する
+
+        def callback(value: float, actor: pv.Actor = actor) -> None:
+            actor.prop.opacity = value
+
+        plotter.add_slider_widget(
+            callback,  # type: ignore[arg-type]  # pyvistaの型スタブの都合でmypyが誤検知する
+            rng=[0.0, 1.0],
+            value=initial_opacity,
+            title=title,
+            pointa=(0.025, top),
+            pointb=(0.31, top),
+        )
 
 
 def _voxels_to_mesh(voxels: list[Voxel]) -> pv.UnstructuredGrid:
