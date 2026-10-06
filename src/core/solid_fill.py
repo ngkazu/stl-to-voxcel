@@ -169,3 +169,25 @@ def _compute_region_parity(
         parity.setdefault(region, 1)
 
     return parity
+
+
+def rasterize_voxels(
+    voxels: list[Voxel],
+    bbox_min: np.ndarray,
+    bbox_max: np.ndarray,
+    cell_size: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Voxel群を一様格子のbool占有グリッドにラスタライズする（公開API）。
+
+    _rasterize_shell と同じ処理だが、expand モジュールなど外部から利用するために公開する。
+
+    Args:
+        voxels: Voxelのリスト
+        bbox_min: バウンディングボックスの最小座標
+        bbox_max: バウンディングボックスの最大座標
+        cell_size: セルサイズ
+
+    Returns:
+        (占有グリッド, グリッド原点座標)
+    """
+    return _rasterize_shell(voxels, bbox_min, bbox_max, cell_size)

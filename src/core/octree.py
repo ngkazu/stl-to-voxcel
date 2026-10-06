@@ -22,6 +22,7 @@ class Voxel:
 
     min_corner: np.ndarray
     max_corner: np.ndarray
+    facet_indices: tuple[int, ...] = ()  # このVoxelと交差するSTL面のインデックス
 
 
 def make_cubic_bbox(bbox_min: np.ndarray, bbox_max: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -75,7 +76,9 @@ def build_voxels(
             child_depth = depth + 1
             edge_avg = float((child_max - child_min).mean())
             if edge_avg < voxel_size:
-                result.append(Voxel(child_min, child_max))  # flag1: 確定
+                result.append(
+                    Voxel(child_min, child_max, tuple(hit_indices.tolist()))
+                )  # flag1: 確定
             elif child_depth < max_depth:
                 queue.append((child_min, child_max, hit_indices, child_depth))  # flag2: 再分割
             else:
@@ -86,7 +89,7 @@ def build_voxels(
                     child_min,
                     child_max,
                 )
-                result.append(Voxel(child_min, child_max))
+                result.append(Voxel(child_min, child_max, tuple(hit_indices.tolist())))
 
     return result
 

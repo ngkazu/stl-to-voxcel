@@ -97,3 +97,90 @@ def triangle_box_overlap_batch(
             separated |= sep_axis & (axis_len_sq >= _EPS)
 
     return ~separated
+
+
+def point_to_triangle_distance(point: np.ndarray, triangle: np.ndarray) -> float:
+    """点から三角形への最短距離を計算する。
+
+    点が三角形の内部に投影される場合は垂直距離、
+    そうでない場合は最近接の辺または頂点への距離を返す。
+    """
+    point = np.asarray(point, dtype=np.float64)
+    v0, v1, v2 = np.asarray(triangle, dtype=np.float64)
+
+    # 三角形の辺ベクトル
+    edge0 = v1 - v0
+    edge1 = v2 - v0
+    v0_to_point = point - v0
+
+    # 平面上での重心座標を計算するためのドット積
+    d00 = np.dot(edge0, edge0)
+    d01 = np.dot(edge0, edge1)
+    d11 = np.dot(edge1, edge1)
+    d20 = np.dot(v0_to_point, edge0)
+    d21 = np.dot(v0_to_point, edge1)
+
+    denom = d00 * d11 - d01 * d01
+    if abs(denom) < _EPS:
+        # 退化三角形（線分または点）→ 3頂点への距離の最小値
+        return min(
+            np.linalg.norm(point - v0),
+            np.linalg.norm(point - v1),
+            np.linalg.norm(point - v2),
+        )
+
+    # 重心座標 (u, v)
+    u = (d11 * d20 - d01 * d21) / denom
+    v = (d00 * d21 - d01 * d20) / denom
+    w = 1.0 - u - v
+
+    # 点が三角形内部に投影される場合
+    if u >= 0 and v >= 0 and w >= 0:
+        closest = v0 + u * edge0 + v * edge1
+        return float(np.linalg.norm(point - closest))
+
+    # 三角形の外側 → 辺または頂点への距離
+    return min(
+        _point_to_segment_distance(point, v0, v1),
+        _point_to_segment_distance(point, v1, v2),
+        _point_to_segment_distance(point, v2, v0),
+    )
+
+
+def _point_to_segment_distance(point: np.ndarray, seg_a: np.ndarray, seg_b: np.ndarray) -> float:
+    """点から線分への最短距離を計算する。"""
+    seg = seg_b - seg_a
+    seg_len_sq = np.dot(seg, seg)
+
+    if seg_len_sq < _EPS:
+        # 線分が点に退化
+        return float(np.linalg.norm(point - seg_a))
+
+    # 線分上の最近接点のパラメータ t ∈ [0, 1]
+    t = max(0.0, min(1.0, np.dot(point - seg_a, seg) / seg_len_sq))
+    closest = seg_a + t * seg
+    return float(np.linalg.norm(point - closest))
+
+
+def point_to_mesh_distance(point: np.ndarray, facets: np.ndarray) -> float:
+    """点からメッシュ（三角形群）への最短距離を計算する。
+
+    facets: shape (N, 3, 3) の三角形配列
+    """
+    min_dist = float("inf")
+    for triangle in facets:
+        dist = point_to_triangle_distance(point, triangle)
+        if dist < min_dist:
+            min_dist = dist
+    return min_dist
+
+
+def points_to_mesh_distance_batch(points: np.ndarray, facets: np.ndarray) -> np.ndarray:
+    """複数の点からメッシュへの最短距離を一括計算する。
+
+    points: shape (M, 3)
+    facets: shape (N, 3, 3)
+    戻り値: shape (M,) の距離配列
+    """
+    points = np.asarray(points, dtype=np.float64)
+    return np.array([point_to_mesh_distance(p, facets) for p in points])
