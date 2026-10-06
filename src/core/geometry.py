@@ -184,3 +184,153 @@ def points_to_mesh_distance_batch(points: np.ndarray, facets: np.ndarray) -> np.
     """
     points = np.asarray(points, dtype=np.float64)
     return np.array([point_to_mesh_distance(p, facets) for p in points])
+
+
+class MeshDistanceCalculator:
+    """KD-treeを使った高速なメッシュ距離計算クラス。
+
+    三角形の重心でKD-treeを構築し、近傍三角形のみを候補として
+    距離計算を行うことで高速化する。
+    """
+
+    def __init__(self, facets: np.ndarray):
+        """初期化。
+
+        Args:
+            facets: 三角形配列 (N, 3, 3)
+        """
+        from scipy.spatial import KDTree
+
+        self.facets = np.asarray(facets, dtype=np.float64)
+        self.n_facets = len(self.facets)
+
+        # 各三角形の重心を計算
+        self.centroids = self.facets.mean(axis=1)  # (N, 3)
+
+        # 各三角形の「半径」（重心から頂点への最大距離）を計算
+        diffs = self.facets - self.centroids[:, np.newaxis, :]  # (N, 3, 3)
+        self.radii = np.max(np.linalg.norm(diffs, axis=2), axis=1)  # (N,)
+
+        # 中央値の半径を基準にする（外れ値の影響を軽減）
+        self.median_radius = float(np.median(self.radii))
+
+        # KD-treeを構築
+        self.kdtree = KDTree(self.centroids)
+
+    def distance(self, point: np.ndarray) -> float:
+        """点からメッシュへの最短距離を計算する。
+
+        Args:
+            point: 点座標 (3,)
+
+        Returns:
+            最短距離
+        """
+        point = np.asarray(point, dtype=np.float64)
+
+        # 段階的に検索半径を広げる
+        min_dist = float("inf")
+
+        # 初期検索半径：中央値半径の3倍から開始
+        search_radius = self.median_radius * 3
+
+        while True:
+            candidate_indices = self.kdtree.query_ball_point(point, search_radius)
+
+            for idx in candidate_indices:
+                # 重心からの距離 - 三角形半径 > 現在の最短距離 なら計算不要
+                centroid_dist = np.linalg.norm(point - self.centroids[idx])
+                if centroid_dist - self.radii[idx] > min_dist:
+                    continue
+
+                dist = point_to_triangle_distance(point, self.facets[idx])
+                if dist < min_dist:
+                    min_dist = dist
+
+            # 検索半径内で見つかった最短距離が、検索半径より十分小さければ終了
+            if min_dist < search_radius - self.median_radius * 2:
+                break
+
+            # 検索半径を広げる
+            search_radius *= 2
+
+            # 全体をカバーしたら終了
+            if search_radius > 10000:
+                break
+
+        return min_dist
+
+    def distances_batch(self, points: np.ndarray) -> np.ndarray:
+        """複数の点からメッシュへの最短距離を一括計算する。
+
+        Args:
+            points: 点座標配列 (M, 3)
+
+        Returns:
+            距離配列 (M,)
+        """
+        points = np.asarray(points, dtype=np.float64)
+        distances = np.zeros(len(points), dtype=np.float64)
+
+        for i, point in enumerate(points):
+            distances[i] = self.distance(point)
+
+        return distances
+
+    def distances_batch_with_hint(
+        self,
+        points: np.ndarray,
+        hint_radius: float,
+    ) -> np.ndarray:
+        """ヒント半径を使った高速な距離計算。
+
+        expand_distanceなど、期待される距離のヒントがある場合に使用。
+        ヒント半径以上離れていることが確認できれば、それ以上計算しない。
+
+        Args:
+            points: 点座標配列 (M, 3)
+            hint_radius: 期待される距離のヒント（これ以上離れていれば十分）
+
+        Returns:
+            距離配列 (M,) - hint_radiusより大きい場合は正確な値ではない可能性あり
+        """
+        points = np.asarray(points, dtype=np.float64)
+        distances = np.full(len(points), float("inf"), dtype=np.float64)
+
+        # 初期検索半径：hint_radius + 中央値半径 * 2（余裕を持たせる）
+        initial_search_radius = hint_radius + self.median_radius * 2
+
+        for i, point in enumerate(points):
+            min_dist = float("inf")
+            search_radius = initial_search_radius
+
+            while True:
+                candidate_indices = self.kdtree.query_ball_point(point, search_radius)
+
+                for idx in candidate_indices:
+                    # 重心からの距離 - 三角形半径 > 現在の最短距離 なら計算不要
+                    centroid_dist = np.linalg.norm(point - self.centroids[idx])
+                    if centroid_dist - self.radii[idx] > min_dist:
+                        continue
+
+                    dist = point_to_triangle_distance(point, self.facets[idx])
+                    if dist < min_dist:
+                        min_dist = dist
+                        # hint_radiusより小さければ早期終了
+                        if min_dist < hint_radius * 0.8:
+                            break
+
+                # 十分近い三角形が見つかった、または検索半径内で収束した
+                if min_dist < hint_radius or min_dist < search_radius - self.median_radius * 2:
+                    break
+
+                # 検索半径を広げる
+                search_radius *= 1.5
+
+                # 十分広げたら終了
+                if search_radius > initial_search_radius * 10:
+                    break
+
+            distances[i] = min_dist
+
+        return distances

@@ -4,9 +4,8 @@ STL表面からユーザー指定の距離以上離れていることを保証�
 将来的には収縮（STL表面への密着）機能の追加も想定している。
 
 高速化のポイント:
-- Cellに記録されたfacet_indicesを活用し、距離計算対象を限定
-- 膨張後のセルには近傍から面番号を伝播させる
-- 距離計算をNumPyでベクトル化
+- KD-treeを使った近傍三角形検索で距離計算を高速化
+- ヒント半径を使った早期終了で不要な計算を削減
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 from scipy import ndimage
 
-from core.geometry import point_to_triangle_distance
+from core.geometry import MeshDistanceCalculator
 from core.model import Cell, CellState, VoxelModel
 
 # 6方向の隣接オフセット
@@ -50,7 +49,8 @@ def expand_model(
 ) -> None:
     """VoxelModelを膨張させ、OUTSIDEセルを追加する。
 
-    STL表面からの距離を検証し、距離が不足するセルは追加しない。
+    外殻頂点がSTL表面から expand_distance 以上離れることを保証する。
+    既に条件を満たしている場合は膨張しない。
 
     Args:
         model: VoxelModel（SHELL/INSIDEセルが登録済み）
@@ -58,45 +58,66 @@ def expand_model(
         expand_distance: STL表面から離す距離
         cell_size: 膨張セルのサイズ
     """
+    if expand_distance <= 0:
+        return
+
     occupied_cells = model.get_occupied_cells()
     if not occupied_cells:
         return
+
+    # KD-treeを使った距離計算器を準備
+    dist_calc = MeshDistanceCalculator(facets)
 
     # bboxを計算
     all_min = np.min([c.min_corner for c in occupied_cells], axis=0)
     all_max = np.max([c.max_corner for c in occupied_cells], axis=0)
 
-    # 占有グリッドを作成
-    occupancy, origin = _rasterize_cells(occupied_cells, all_min, all_max, cell_size)
+    # 占有グリッドを作成（膨張分のパディングを確保）
+    occupancy, origin = _rasterize_cells(
+        occupied_cells, all_min, all_max, cell_size, expand_distance
+    )
+    original_occupancy = occupancy.copy()
 
-    # セル位置→面番号のマッピングを構築
-    cell_to_facets = _build_cell_to_facets_map(occupied_cells, origin, cell_size, occupancy.shape)
+    # 現在の外殻頂点の最小距離を計算
+    exterior_vertices, vertex_to_cells = _extract_exterior_vertices(occupancy, origin, cell_size)
+
+    if len(exterior_vertices) == 0:
+        return
+
+    distances = dist_calc.distances_batch_with_hint(exterior_vertices, expand_distance)
+    min_distance = float(np.min(distances))
+
+    # 既に条件を満たしている場合は膨張不要
+    if min_distance >= expand_distance:
+        return
+
+    # 必要な膨張回数: 不足分をカバーするのに必要なセル数
+    shortage = expand_distance - min_distance
+    expand_iterations = int(np.ceil(shortage / cell_size))
+
+    if expand_iterations <= 0:
+        return
 
     # 膨張処理
-    expanded = _dilate_occupancy(occupancy, cell_size, expand_distance)
+    expanded = occupancy
+    for _ in range(expand_iterations):
+        expanded = _dilate_once(expanded)
 
-    # 膨張後の新セルに面番号を伝播
-    cell_to_facets = _propagate_facets_to_expanded(
-        expanded, occupancy, cell_to_facets, cell_size, expand_distance
-    )
-
-    # 外殻頂点を抽出
+    # 膨張後の外殻頂点を抽出
     exterior_vertices, vertex_to_cells = _extract_exterior_vertices(expanded, origin, cell_size)
 
     if len(exterior_vertices) == 0:
         return
 
     # 距離計算
-    distances = _compute_distances_fast(exterior_vertices, vertex_to_cells, cell_to_facets, facets)
-
-    # 距離が不足している頂点を特定
-    insufficient_mask = distances < expand_distance
+    distances = dist_calc.distances_batch_with_hint(exterior_vertices, expand_distance)
 
     # 距離不足の頂点を持つセルを除外
+    insufficient_mask = distances < expand_distance
     validated = _filter_by_distance(expanded, exterior_vertices, vertex_to_cells, insufficient_mask)
 
     # 新規追加されたセル（元のoccupancyにはなかったセル）をOUTSIDEとして追加
-    new_cells_mask = validated & ~occupancy
+    new_cells_mask = validated & ~original_occupancy
     for idx in np.argwhere(new_cells_mask):
         cell_origin = origin + idx * cell_size
         cell = Cell(
@@ -114,10 +135,17 @@ def _rasterize_cells(
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
     cell_size: float,
+    expand_distance: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """セル群を一様格子のbool占有グリッドにラスタライズする。"""
-    bbox_min = np.asarray(bbox_min, dtype=np.float64) - cell_size
-    bbox_max = np.asarray(bbox_max, dtype=np.float64) + cell_size
+    """セル群を一様格子のbool占有グリッドにラスタライズする。
+
+    expand_distance が指定された場合、膨張処理で必要な領域を確保するため
+    その分のパディングを追加する。
+    """
+    # パディング: 最低1セル + 膨張距離分
+    padding = cell_size + expand_distance
+    bbox_min = np.asarray(bbox_min, dtype=np.float64) - padding
+    bbox_max = np.asarray(bbox_max, dtype=np.float64) + padding
     shape = np.maximum(np.ceil((bbox_max - bbox_min) / cell_size).astype(int), 1)
     occupancy = np.zeros(tuple(shape), dtype=bool)
 
@@ -129,109 +157,10 @@ def _rasterize_cells(
     return occupancy, bbox_min
 
 
-def _build_cell_to_facets_map(
-    cells: list[Cell],
-    origin: np.ndarray,
-    cell_size: float,
-    grid_shape: tuple[int, ...],
-) -> dict[tuple[int, int, int], set[int]]:
-    """セルリストからグリッド位置→面番号のマッピングを構築する。"""
-    cell_to_facets: dict[tuple[int, int, int], set[int]] = {}
-    grid_shape_arr = np.array(grid_shape)
-
-    for cell in cells:
-        if not cell.facet_indices:
-            continue
-
-        lo = np.clip(
-            np.floor((cell.min_corner - origin) / cell_size).astype(int),
-            0,
-            grid_shape_arr - 1,
-        )
-        hi = np.clip(
-            np.ceil((cell.max_corner - origin) / cell_size).astype(int),
-            1,
-            grid_shape_arr,
-        )
-
-        for ix in range(lo[0], hi[0]):
-            for iy in range(lo[1], hi[1]):
-                for iz in range(lo[2], hi[2]):
-                    cell_key = (ix, iy, iz)
-                    if cell_key not in cell_to_facets:
-                        cell_to_facets[cell_key] = set()
-                    cell_to_facets[cell_key].update(cell.facet_indices)
-
-    return cell_to_facets
-
-
-def _propagate_facets_to_expanded(
-    expanded: np.ndarray,
-    original: np.ndarray,
-    cell_to_facets: dict[tuple[int, int, int], set[int]],
-    cell_size: float,
-    expand_distance: float,
-) -> dict[tuple[int, int, int], set[int]]:
-    """膨張で追加されたセルに、近傍セルから面番号を伝播させる。"""
-    result = dict(cell_to_facets)
-
-    new_cells = expanded & ~original
-    new_indices = np.argwhere(new_cells)
-
-    if len(new_indices) == 0:
-        return result
-
-    search_radius = int(np.ceil(expand_distance / cell_size)) + 1
-    shape = np.array(expanded.shape)
-
-    # 近傍オフセットを事前計算（球状の近傍）
-    offsets = []
-    for dx in range(-search_radius, search_radius + 1):
-        for dy in range(-search_radius, search_radius + 1):
-            for dz in range(-search_radius, search_radius + 1):
-                if dx * dx + dy * dy + dz * dz <= search_radius * search_radius:
-                    offsets.append((dx, dy, dz))
-    offsets = np.array(offsets, dtype=np.int32)
-
-    for idx in new_indices:
-        ix, iy, iz = idx
-        cell_key = (ix, iy, iz)
-
-        facets_for_cell: set[int] = set()
-        neighbors = idx + offsets
-        valid = np.all((neighbors >= 0) & (neighbors < shape), axis=1)
-        neighbors = neighbors[valid]
-
-        for n in neighbors:
-            n_key = (int(n[0]), int(n[1]), int(n[2]))
-            if n_key in cell_to_facets:
-                facets_for_cell.update(cell_to_facets[n_key])
-
-        if facets_for_cell:
-            result[cell_key] = facets_for_cell
-
-    return result
-
-
-def _dilate_occupancy(
-    occupancy: np.ndarray,
-    cell_size: float,
-    expand_distance: float,
-) -> np.ndarray:
-    """占有グリッドをモルフォロジー膨張させる。"""
-    expand_cells = int(np.ceil(expand_distance / cell_size))
-
-    if expand_cells <= 0:
-        return occupancy.copy()
-
+def _dilate_once(occupancy: np.ndarray) -> np.ndarray:
+    """占有グリッドを1回だけモルフォロジー膨張させる。"""
     struct = ndimage.generate_binary_structure(3, 1)
-    expanded = ndimage.binary_dilation(
-        occupancy,
-        structure=struct,
-        iterations=expand_cells,
-    )
-
-    return expanded
+    return ndimage.binary_dilation(occupancy, structure=struct, iterations=1)
 
 
 def _extract_exterior_vertices(
@@ -281,86 +210,6 @@ def _extract_exterior_vertices(
         vertex_to_cells[vidx] = cells
 
     return vertices, vertex_to_cells
-
-
-def _compute_distances_fast(
-    vertices: np.ndarray,
-    vertex_to_cells: dict[int, list[tuple[int, int, int]]],
-    cell_to_facets: dict[tuple[int, int, int], set[int]],
-    facets: np.ndarray,
-) -> np.ndarray:
-    """面番号のヒントを活用して距離計算を高速化する。"""
-    n_vertices = len(vertices)
-    distances = np.full(n_vertices, float("inf"), dtype=np.float64)
-
-    for vidx in range(n_vertices):
-        vertex = vertices[vidx]
-
-        related_cells = vertex_to_cells.get(vidx, [])
-
-        candidate_facets: set[int] = set()
-        for cell in related_cells:
-            if cell in cell_to_facets:
-                candidate_facets.update(cell_to_facets[cell])
-
-        if not candidate_facets:
-            candidate_facets = set(range(len(facets)))
-
-        candidate_list = list(candidate_facets)
-        candidate_triangles = facets[candidate_list]
-
-        min_dist = _point_to_triangles_min_distance(vertex, candidate_triangles)
-        distances[vidx] = min_dist
-
-    return distances
-
-
-def _point_to_triangles_min_distance(point: np.ndarray, triangles: np.ndarray) -> float:
-    """点から複数の三角形への最短距離を計算する（ベクトル化版）。"""
-    if len(triangles) == 0:
-        return float("inf")
-
-    if len(triangles) <= 10:
-        return min(point_to_triangle_distance(point, tri) for tri in triangles)
-
-    point = np.asarray(point, dtype=np.float64)
-    v0 = triangles[:, 0]
-    v1 = triangles[:, 1]
-    v2 = triangles[:, 2]
-
-    edge0 = v1 - v0
-    edge1 = v2 - v0
-    v0_to_point = point - v0
-
-    d00 = np.einsum("ij,ij->i", edge0, edge0)
-    d01 = np.einsum("ij,ij->i", edge0, edge1)
-    d11 = np.einsum("ij,ij->i", edge1, edge1)
-    d20 = np.einsum("ij,ij->i", v0_to_point, edge0)
-    d21 = np.einsum("ij,ij->i", v0_to_point, edge1)
-
-    denom = d00 * d11 - d01 * d01
-    valid = np.abs(denom) > 1e-12
-    u = np.zeros(len(triangles))
-    v = np.zeros(len(triangles))
-    u[valid] = (d11[valid] * d20[valid] - d01[valid] * d21[valid]) / denom[valid]
-    v[valid] = (d00[valid] * d21[valid] - d01[valid] * d20[valid]) / denom[valid]
-    w = 1.0 - u - v
-
-    inside = valid & (u >= 0) & (v >= 0) & (w >= 0)
-
-    distances = np.full(len(triangles), float("inf"))
-
-    if np.any(inside):
-        closest_inside = (
-            v0[inside] + u[inside, None] * edge0[inside] + v[inside, None] * edge1[inside]
-        )
-        distances[inside] = np.linalg.norm(point - closest_inside, axis=1)
-
-    outside_indices = np.where(~inside)[0]
-    for idx in outside_indices:
-        distances[idx] = point_to_triangle_distance(point, triangles[idx])
-
-    return float(np.min(distances))
 
 
 def _filter_by_distance(
