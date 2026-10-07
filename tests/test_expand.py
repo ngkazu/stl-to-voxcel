@@ -39,11 +39,14 @@ class TestExpandModel:
         initial_shell_count = model.shell_count
         assert initial_shell_count > 0
 
+        # 格子セルサイズ（SHELLセルの最小サイズ、各軸）
+        cell_size = model.get_min_cell_size()
+
         # 内部充填
-        fill_solid(model, voxel_size)
+        fill_solid(model, cell_size)
 
         # 膨張処理
-        expand_model(model, facets, expand_distance, voxel_size)
+        expand_model(model, facets, expand_distance, cell_size)
 
         # OUTSIDEセルが追加されていることを確認
         assert model.outside_count > 0
@@ -57,13 +60,14 @@ class TestExpandModel:
 
         # VoxelModel構築
         model = build_voxel_model(bbox_min, bbox_max, facets, voxel_size, cubic_root=False)
-        fill_solid(model, voxel_size)
+        cell_size = model.get_min_cell_size()
+        fill_solid(model, cell_size)
 
         shell_count_before = model.shell_count
         inside_count_before = model.inside_count
 
         # 膨張処理
-        expand_model(model, facets, expand_distance, voxel_size)
+        expand_model(model, facets, expand_distance, cell_size)
 
         # SHELL/INSIDEセル数が変わらないことを確認
         assert model.shell_count == shell_count_before
@@ -77,12 +81,13 @@ class TestExpandModel:
 
         # VoxelModel構築
         model = build_voxel_model(bbox_min, bbox_max, facets, voxel_size, cubic_root=False)
-        fill_solid(model, voxel_size)
+        cell_size = model.get_min_cell_size()
+        fill_solid(model, cell_size)
 
         cell_count_before = model.cell_count
 
         # 膨張処理（距離0）
-        expand_model(model, facets, expand_distance, voxel_size)
+        expand_model(model, facets, expand_distance, cell_size)
 
         # セル数が変わらないことを確認
         assert model.cell_count == cell_count_before
@@ -96,8 +101,9 @@ class TestExpandModel:
 
         # VoxelModel構築
         model = build_voxel_model(bbox_min, bbox_max, facets, voxel_size, cubic_root=False)
-        fill_solid(model, voxel_size)
-        expand_model(model, facets, expand_distance, voxel_size)
+        cell_size = model.get_min_cell_size()
+        fill_solid(model, cell_size)
+        expand_model(model, facets, expand_distance, cell_size)
 
         # 全セルの状態を確認
         for cell in model.cells:
@@ -114,10 +120,11 @@ class TestExpandModel:
 
         # VoxelModel構築
         model = build_voxel_model(bbox_min, bbox_max, facets, voxel_size, cubic_root=False)
-        fill_solid(model, voxel_size)
+        cell_size = model.get_min_cell_size()
+        fill_solid(model, cell_size)
 
         # 膨張処理
-        expand_model(model, facets, expand_distance, voxel_size)
+        expand_model(model, facets, expand_distance, cell_size)
 
         # 膨張が必要なら追加される、不要なら0のまま（どちらも正常動作）
         # 重要なのは距離保証であり、OUTSIDEセル数ではない

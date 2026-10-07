@@ -27,7 +27,7 @@ class Cell:
     """1つのセル（確定したVoxel）"""
 
     origin: np.ndarray  # このセルの原点（min_corner）
-    size: float  # このセルのサイズ
+    size: np.ndarray  # このセルのサイズ [sx, sy, sz]（軸ごとに異なりうる）
     depth: int  # 8分木の分割回数
     state: CellState  # 状態
     facet_indices: tuple[int, ...] | None = None  # 交差するSTL面番号（SHELLのみ）
@@ -83,6 +83,25 @@ class VoxelModel:
     def add_cells(self, cells: list[Cell]) -> None:
         """複数のセルを追加"""
         self.cells.extend(cells)
+
+    def get_min_cell_size(self) -> np.ndarray:
+        """SHELLセルの最小セルサイズ [sx, sy, sz] を返す。
+
+        8分木で分割された最小セルのサイズ（各軸）を返す。
+        充填・膨張時の格子セルサイズとして使用する。
+        cubic_root無しの場合は非立方体（軸ごとに異なる）になりうる。
+        """
+        shell_cells = self.get_shell_cells()
+        if not shell_cells:
+            # SHELLがなければ占有セルから、それも無ければbase_cell_sizeを使う
+            occupied = self.get_occupied_cells()
+            if not occupied:
+                return np.array(
+                    [self.base_cell_size, self.base_cell_size, self.base_cell_size],
+                    dtype=np.float64,
+                )
+            return np.min([c.size for c in occupied], axis=0)
+        return np.min([c.size for c in shell_cells], axis=0)
 
     @property
     def cell_count(self) -> int:

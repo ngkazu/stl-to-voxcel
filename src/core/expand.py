@@ -45,7 +45,7 @@ def expand_model(
     model: VoxelModel,
     facets: np.ndarray,
     expand_distance: float,
-    cell_size: float,
+    cell_size: np.ndarray,
 ) -> None:
     """VoxelModelを膨張させ、OUTSIDEセルを追加する。
 
@@ -56,10 +56,12 @@ def expand_model(
         model: VoxelModel（SHELL/INSIDEセルが登録済み）
         facets: 元STLの三角形群 (N, 3, 3)
         expand_distance: STL表面から離す距離
-        cell_size: 膨張セルのサイズ
+        cell_size: 膨張セルのサイズ [sx, sy, sz]（軸ごとに異なりうる）
     """
     if expand_distance <= 0:
         return
+
+    cell_size = np.asarray(cell_size, dtype=np.float64)
 
     occupied_cells = model.get_occupied_cells()
     if not occupied_cells:
@@ -92,8 +94,11 @@ def expand_model(
         return
 
     # 必要な膨張回数: 不足分をカバーするのに必要なセル数
+    # 1回の膨張で進む距離は軸ごとに異なるため、最小軸を基準にすると
+    # 全軸で確実に expand_distance 以上膨張する。
     shortage = expand_distance - min_distance
-    expand_iterations = int(np.ceil(shortage / cell_size))
+    min_axis_size = float(cell_size.min())
+    expand_iterations = int(np.ceil(shortage / min_axis_size))
 
     if expand_iterations <= 0:
         return
@@ -122,7 +127,7 @@ def expand_model(
         cell_origin = origin + idx * cell_size
         cell = Cell(
             origin=cell_origin,
-            size=cell_size,
+            size=cell_size.copy(),
             depth=-1,  # 膨張セルはdepth不定
             state=CellState.OUTSIDE,
             facet_indices=None,
@@ -134,14 +139,17 @@ def _rasterize_cells(
     cells: list[Cell],
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
-    cell_size: float,
+    cell_size: np.ndarray,
     expand_distance: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """セル群を一様格子のbool占有グリッドにラスタライズする。
 
     expand_distance が指定された場合、膨張処理で必要な領域を確保するため
     その分のパディングを追加する。
+
+    cell_size は [sx, sy, sz] の配列で、軸ごとに異なるサイズを許容する。
     """
+    cell_size = np.asarray(cell_size, dtype=np.float64)
     # パディング: 最低1セル + 膨張距離分
     padding = cell_size + expand_distance
     bbox_min = np.asarray(bbox_min, dtype=np.float64) - padding
@@ -166,7 +174,7 @@ def _dilate_once(occupancy: np.ndarray) -> np.ndarray:
 def _extract_exterior_vertices(
     occupancy: np.ndarray,
     origin: np.ndarray,
-    cell_size: float,
+    cell_size: np.ndarray,
 ) -> tuple[np.ndarray, dict[int, list[tuple[int, int, int]]]]:
     """外殻に露出している頂点を抽出する。"""
     shape = np.array(occupancy.shape)

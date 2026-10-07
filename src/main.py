@@ -58,13 +58,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # 内部充填
     if args.solid_fill or args.expand is not None:
-        fill_solid(model, args.voxel_size)
+        # 充填・膨張の格子セルサイズ（SHELLセルの最小サイズ、各軸）
+        # cubic_root無しだと非立方体になりうるため np.ndarray で扱う
+        min_cell_size = model.get_min_cell_size()
+        fill_solid(model, min_cell_size)
         print(f"cells (inside): {model.inside_count}")
 
         # 膨張処理
         if args.expand is not None:
             print(f"expand distance: {args.expand}")
-            expand_model(model, facets, args.expand, args.voxel_size)
+            expand_model(model, facets, args.expand, min_cell_size)
             print(f"cells (outside): {model.outside_count}")
 
     # 統計表示

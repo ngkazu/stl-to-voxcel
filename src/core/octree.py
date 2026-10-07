@@ -69,13 +69,16 @@ def build_voxel_model(
                 continue  # flag0: 交差なし -> 破棄
 
             child_depth = depth + 1
-            child_size = float((child_max - child_min)[0])  # 立方体なので1辺でOK
+            # 各軸のサイズ [sx, sy, sz]（cubic_root無しだと非立方体になりうる）
+            child_size = child_max - child_min
+            # 分割判定は最大辺を基準にする（全軸がvoxel_size以下になったら確定）
+            max_edge = float(child_size.max())
 
-            if child_size <= voxel_size:
+            if max_edge <= voxel_size:
                 # flag1: 確定 → SHELLセルとして追加
                 cell = Cell(
                     origin=child_min.copy(),
-                    size=child_size,
+                    size=child_size.copy(),
                     depth=child_depth,
                     state=CellState.SHELL,
                     facet_indices=tuple(hit_indices.tolist()),
@@ -95,7 +98,7 @@ def build_voxel_model(
                 )
                 cell = Cell(
                     origin=child_min.copy(),
-                    size=child_size,
+                    size=child_size.copy(),
                     depth=child_depth,
                     state=CellState.SHELL,
                     facet_indices=tuple(hit_indices.tolist()),

@@ -19,7 +19,7 @@ _UNLABELED = -1
 _NEIGHBOR_OFFSETS = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
 
 
-def fill_solid(model: VoxelModel, cell_size: float) -> None:
+def fill_solid(model: VoxelModel, cell_size: np.ndarray) -> None:
     """シェルVoxelから内部充填を行い、INSIDEセルをmodelに追加する。
 
     元のシェルセルはそのまま残り、内部充填セルがINSIDEとして追加される。
@@ -27,8 +27,9 @@ def fill_solid(model: VoxelModel, cell_size: float) -> None:
 
     Args:
         model: VoxelModel（SHELLセルが登録済み）
-        cell_size: 充填セルのサイズ
+        cell_size: 充填セルのサイズ [sx, sy, sz]（軸ごとに異なりうる）
     """
+    cell_size = np.asarray(cell_size, dtype=np.float64)
     shell_cells = model.get_shell_cells()
     if not shell_cells:
         return
@@ -51,7 +52,7 @@ def fill_solid(model: VoxelModel, cell_size: float) -> None:
         cell_origin = origin + index * cell_size
         cell = Cell(
             origin=cell_origin,
-            size=cell_size,
+            size=cell_size.copy(),
             depth=-1,  # 充填セルはdepth不定（8分木由来ではない）
             state=CellState.INSIDE,
             facet_indices=None,
@@ -63,13 +64,16 @@ def _rasterize_shell(
     cells: list[Cell],
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
-    cell_size: float,
+    cell_size: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """シェルセル群を、一様格子のbool占有グリッド（True=シェル）にラスタライズする。
 
     bboxの外周に1セル分のpaddingを追加する。「外側」判定はグリッド境界面の空セルを
     頼りにしており、bboxがモデルにぴったり密着している（余白がない）とそれが成立しないため。
+
+    cell_size は [sx, sy, sz] の配列で、軸ごとに異なるサイズを許容する。
     """
+    cell_size = np.asarray(cell_size, dtype=np.float64)
     bbox_min = np.asarray(bbox_min, dtype=np.float64) - cell_size
     bbox_max = np.asarray(bbox_max, dtype=np.float64) + cell_size
     shape = np.maximum(np.ceil((bbox_max - bbox_min) / cell_size).astype(int), 1)
@@ -186,13 +190,13 @@ def _compute_region_parity(
 
 def rasterize_model(
     model: VoxelModel,
-    cell_size: float,
+    cell_size: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """VoxelModelを一様格子のbool占有グリッドにラスタライズする。
 
     Args:
         model: VoxelModel
-        cell_size: セルサイズ
+        cell_size: セルサイズ [sx, sy, sz]（軸ごとに異なりうる）
 
     Returns:
         (占有グリッド, グリッド原点座標)
