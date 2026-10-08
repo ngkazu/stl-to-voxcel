@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+import numpy as np
+
 from core.expand import expand_model
 from core.octree import build_voxel_model
 from core.solid_fill import fill_solid
@@ -55,6 +57,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"voxel_size: {args.voxel_size}")
     print(f"cells (shell): {model.shell_count}")
+
+    # SHELLセルのサイズ情報を出力（ユニークなサイズ [sx,sy,sz] と個数）
+    # cubic_root無しだと非立方体になりうるため、軸ごとに確認できるようにする
+    shell_cells = model.get_shell_cells()
+    if shell_cells:
+        sizes = np.array([c.size for c in shell_cells])
+        unique_sizes, counts = np.unique(sizes, axis=0, return_counts=True)
+        print(f"cells (shell) sizes: {len(unique_sizes)} unique")
+        for size, count in zip(unique_sizes, counts, strict=True):
+            print(f"  size=[{size[0]:.4g}, {size[1]:.4g}, {size[2]:.4g}] x {count}")
 
     # 内部充填
     if args.solid_fill or args.expand is not None:
