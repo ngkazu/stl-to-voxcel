@@ -67,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cells (shell) sizes: {len(unique_sizes)} unique")
         for size, count in zip(unique_sizes, counts, strict=True):
             print(f"  size=[{size[0]:.4g}, {size[1]:.4g}, {size[2]:.4g}] x {count}")
+        print(f"cells (shell) max depth: {max(c.depth for c in shell_cells)}")
 
     # 内部充填
     if args.solid_fill:

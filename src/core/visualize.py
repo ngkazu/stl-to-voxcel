@@ -26,6 +26,8 @@ def show_model(
     （ウィジェットでVoxel単位ごと綺麗に切断されるよう crinkle=True を使う）。
     """
     plotter = pv.Plotter()
+    # パース（透視投影）を無効化し平行投影にする。mypyはpyvistaの型スタブの都合で誤検知する。
+    plotter.enable_parallel_projection()  # type: ignore[call-arg]
 
     def add(mesh: pv.DataSet, **kwargs: Any) -> pv.Actor:
         if cross_section:
