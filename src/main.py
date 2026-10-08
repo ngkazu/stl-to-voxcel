@@ -7,6 +7,7 @@ import sys
 
 import numpy as np
 
+from core.export import export_voxel_stl
 from core.octree import build_voxel_model
 from core.shrink import shrink_model
 from core.solid_fill import fill_solid
@@ -44,6 +45,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="SHELLセルの外殻面をSTL表面まで縮める（greedy meshing+面積ベースのスイープ距離計算）",
     )
+    parser.add_argument(
+        "--export-stl",
+        metavar="PATH",
+        help="SHELL+INSIDEセルの境界面だけをSTLとして指定パスに書き出す",
+    )
+    parser.add_argument(
+        "--export-merge",
+        action="store_true",
+        help="--export-stlで面をgreedy mergingして出力する（デフォルトはセル単位の未マージ出力）",
+    )
     args = parser.parse_args(argv)
 
     # STL読み込み
@@ -80,6 +91,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.shrink:
         shrink_model(model, facets)
         print("shrink: done")
+
+    # SHELL+INSIDEセルの境界面をSTLとして書き出す
+    if args.export_stl:
+        n_triangles = export_voxel_stl(model, args.export_stl, merge_faces=args.export_merge)
+        print(f"export_stl: {args.export_stl} ({n_triangles} triangles)")
+
     # 統計表示
     print(f"total cells: {model.cell_count}")
 

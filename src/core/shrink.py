@@ -62,19 +62,31 @@ def _shrink_merged_face(model: VoxelModel, merged: MergedFace, facets: np.ndarra
         cell.face_positions = face_positions
 
 
-def greedy_merge_faces(model: VoxelModel, axis: int, direction: int) -> list[MergedFace]:
+def greedy_merge_faces(
+    model: VoxelModel,
+    axis: int,
+    direction: int,
+    cells: list[Cell] | None = None,
+) -> list[MergedFace]:
     """同一サイズ・同一平面上で隣接する外殻面を greedy meshing でマージする。
 
-    対象は、指定方向の隣接セルが OUTSIDE または存在しない（境界外/EMPTY）SHELLセル。
+    対象は、指定方向の隣接セルが OUTSIDE または存在しない（境界外/EMPTY）セル。
     マージは同一depth（同一サイズ）・同一レイヤー（スイープ軸のグリッドインデックスが同じ）
     のセル同士でのみ行う。
+
+    Args:
+        cells: マージ対象の候補セル集合。Noneなら `model.get_shell_cells()`
+            （shrinkでの従来の挙動と後方互換）。STL出力等でSHELL+INSIDEを対象にする場合は
+            呼び出し側から明示的に渡す。
     """
     axes = [a for a in range(3) if a != axis]
     axis_a, axis_b = axes
 
+    target_cells = model.get_shell_cells() if cells is None else cells
+
     # (depth, スイープ軸グリッドインデックス) ごとに、2Dグリッド(axis_a,axis_b) -> Cell を集める
     by_depth_layer: dict[tuple[int, int], dict[tuple[int, int], Cell]] = {}
-    for cell in model.get_shell_cells():
+    for cell in target_cells:
         if model.get_neighbor_state(cell, axis, direction) not in (None, CellState.OUTSIDE):
             continue
         index = code_to_grid_index(cell.code)
@@ -150,15 +162,19 @@ def _build_merged_face(
     cell_size_axis = 0.0
 
     for cell in source_cells:
-        origin, size = model.cell_origin_size(cell)
-        min_a = min(min_a, origin[axis_a])
-        max_a = max(max_a, origin[axis_a] + size[axis_a])
-        min_b = min(min_b, origin[axis_b])
-        max_b = max(max_b, origin[axis_b] + size[axis_b])
+        # cell_face_positions() はshrink後の実位置（未shrinkなら元のorigin/size由来）を返す
+        face_positions = model.cell_face_positions(cell)
+        a_min, a_max = face_positions[axis_a * 2], face_positions[axis_a * 2 + 1]
+        b_min, b_max = face_positions[axis_b * 2], face_positions[axis_b * 2 + 1]
+        min_a = min(min_a, a_min)
+        max_a = max(max_a, a_max)
+        min_b = min(min_b, b_min)
+        max_b = max(max_b, b_max)
         if cell.facet_indices:
             facet_indices.update(cell.facet_indices)
-        face_coord = origin[axis] + size[axis] if direction > 0 else origin[axis]
-        cell_size_axis = size[axis]
+        axis_min, axis_max = face_positions[axis * 2], face_positions[axis * 2 + 1]
+        face_coord = axis_max if direction > 0 else axis_min
+        cell_size_axis = axis_max - axis_min
 
     return MergedFace(
         axis=axis,

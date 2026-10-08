@@ -37,9 +37,11 @@ stl-to-voxcel/
     core/
       model.py            # Data structures: Cell, CellState, VoxelModel (locational code)
       stl_loader.py       # STL loading (numpy-stl) + degenerate-facet filtering
-      geometry.py         # Triangle-box overlap test, point-to-mesh distance (KD-tree)
+      geometry.py         # Triangle-box overlap test, point-to-mesh distance (KD-tree), sweep distance
       octree.py           # Octree subdivision -> VoxelModel (SHELL cells)
       solid_fill.py       # Interior fill via flood-fill + shell-crossing parity (INSIDE cells)
+      shrink.py           # Shrink SHELL outer faces to the STL surface (greedy-merged faces + sweep distance)
+      export.py           # Export SHELL+INSIDE boundary faces as an STL file
       visualize.py        # PyVista rendering (state-based colors, cross-section clip)
   tests/                  # pytest unit tests
   data/                   # Sample/test STL files
@@ -68,6 +70,9 @@ Options:
 |---|---|
 | `--cubic-root` | Expand the root bounding box to a cube (longest edge, same center) before subdividing, so every Voxel is a cube instead of inheriting the STL's aspect ratio. |
 | `--no-solid-fill` | Produce a shell-only voxelization (skip the interior fill). By default the interior is filled; nested cavities are correctly left empty (see "What it does" above). |
+| `--shrink` | Shrink SHELL outer faces inward to touch the STL surface (greedy-merged faces + area-based sweep distance). See `src/core/shrink.py`. |
+| `--export-stl PATH` | Write the SHELL+INSIDE boundary faces (faces touching EMPTY/OUTSIDE/non-existent cells) to `PATH` as an STL file. Internal faces between occupied cells are excluded. |
+| `--export-merge` | With `--export-stl`, greedy-merge coplanar adjacent faces before triangulating instead of emitting one quad per cell (default). Merging can leave gaps at edges/corners after `--shrink` since neighboring merged faces are shrunk independently; use the per-cell default if you see holes. |
 | `--cross-section` | Replace static rendering with an interactive, draggable clip-plane widget so you can see inside the shell/fill. |
 | `--no-visualize` | Skip opening the PyVista window (useful for scripted/headless runs). |
 
@@ -82,10 +87,14 @@ python src\main.py data\case1.stl --voxel-size 5 --no-solid-fill
 
 # Solid fill with interactive cross-section
 python src\main.py data\case1.stl --voxel-size 5 --cross-section
+
+# Shrink the shell to the STL surface and export the result as STL
+python src\main.py data\case1.stl --voxel-size 5 --shrink --export-stl data\output.stl
 ```
 
-This prints a summary (facet count, bounding box, resulting Voxel count, and solid-fill
-count) and opens a PyVista window showing:
+This prints a summary (facet count, bounding box, resulting Voxel count, solid-fill
+count, and exported triangle count when `--export-stl` is used) and opens a PyVista
+window showing:
 - **SHELL** cells (orange, semi-transparent) — voxels touching the STL surface
 - **INSIDE** cells (green) — filled interior voxels (unless `--no-solid-fill`)
 - Original mesh (light blue wireframe)
@@ -107,4 +116,9 @@ pytest tests -v               # Run tests
   detect "outside" (handled internally via automatic 1-cell padding) and assumes
   each nested shell layer is a properly closed (watertight) surface; a non-watertight
   mesh can produce incorrect parity results. Use `--no-solid-fill` for a shell-only result.
+- `--export-stl` after `--shrink` can produce a non-watertight ("holey") mesh: shrink
+  moves each outer face inward independently, so two adjacent outer faces of the same
+  cell (e.g. at a corner/edge of the model) can end up offset from each other with no
+  geometry filling the gap between them. A true solid union of the Voxel boxes (rather
+  than a merged-face STL) is being considered as a follow-up to avoid this.
 - `visualize.py` requires a display and is not covered by automated tests.
