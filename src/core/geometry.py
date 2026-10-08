@@ -186,6 +186,102 @@ def points_to_mesh_distance_batch(points: np.ndarray, facets: np.ndarray) -> np.
     return np.array([point_to_mesh_distance(p, facets) for p in points])
 
 
+def _interp_on_edge(p1: np.ndarray, p2: np.ndarray, axis: int, value: float) -> np.ndarray:
+    """p1→p2 の線分上で、指定axis座標がvalueになる点を3D全座標で線形補間する。"""
+    t = (value - p1[axis]) / (p2[axis] - p1[axis])
+    return p1 + t * (p2 - p1)
+
+
+def _clip_polygon_to_half_plane(
+    points: list[np.ndarray], axis: int, value: float, keep_greater_equal: bool
+) -> list[np.ndarray]:
+    """Sutherland-Hodgman法で、polygonを1つの軸平行半平面にクリップする。
+
+    keep_greater_equal=True なら axis座標 >= value の領域を残す（下限クリップ）。
+    False なら axis座標 <= value の領域を残す（上限クリップ）。
+    """
+    if not points:
+        return []
+    output: list[np.ndarray] = []
+    n = len(points)
+    for i in range(n):
+        curr = points[i]
+        prev = points[i - 1]
+        curr_in = curr[axis] >= value if keep_greater_equal else curr[axis] <= value
+        prev_in = prev[axis] >= value if keep_greater_equal else prev[axis] <= value
+        if curr_in:
+            if not prev_in:
+                output.append(_interp_on_edge(prev, curr, axis, value))
+            output.append(curr)
+        elif prev_in:
+            output.append(_interp_on_edge(prev, curr, axis, value))
+    return output
+
+
+def clip_triangle_to_rect(
+    triangle: np.ndarray,
+    axis_a: int,
+    axis_b: int,
+    rect: tuple[float, float, float, float],
+) -> np.ndarray:
+    """三角形(3D, shape=(3,3))を、axis_a/axis_b平面上のrectでクリップする。
+
+    rect = (min_a, max_a, min_b, max_b)。三角形の3頂点は3D座標のまま保持し、
+    axis_a/axis_bの2軸だけを使ってクリップする（Sutherland-Hodgman）。
+    クリップで生じる新頂点は元の辺上の線形補間のため、3軸目（スイープ軸）の
+    座標も正しく保持される。
+
+    戻り値: クリップ後ポリゴンの3D頂点配列 (K, 3)。重なりが無ければ (0, 3)。
+    """
+    min_a, max_a, min_b, max_b = rect
+    triangle = np.asarray(triangle, dtype=np.float64)
+    polygon: list[np.ndarray] = [triangle[0], triangle[1], triangle[2]]
+
+    polygon = _clip_polygon_to_half_plane(polygon, axis_a, min_a, keep_greater_equal=True)
+    polygon = _clip_polygon_to_half_plane(polygon, axis_a, max_a, keep_greater_equal=False)
+    polygon = _clip_polygon_to_half_plane(polygon, axis_b, min_b, keep_greater_equal=True)
+    polygon = _clip_polygon_to_half_plane(polygon, axis_b, max_b, keep_greater_equal=False)
+
+    if not polygon:
+        return np.zeros((0, 3))
+    return np.array(polygon)
+
+
+def sweep_distance_to_facets(
+    face_coord: float,
+    rect: tuple[float, float, float, float],
+    axis: int,
+    direction: int,
+    facets: np.ndarray,
+) -> float | None:
+    """面からSTL表面までの、スイープ軸方向の最近接距離（非負）を返す。
+
+    面を点ではなく矩形（rect、スイープしない2軸の範囲）として扱い、候補ファセットを
+    rectでクリップして重なりを判定する（4頂点サンプリングと違い、面の中央にしか
+    触れないファセットも検出できる）。クリップ後ポリゴンの頂点のうち、face_coordから
+    direction方向に最初に到達する点までの距離を、候補ファセットすべての中から
+    最小のものとして返す。どの候補ファセットもrectと重ならなければNoneを返す。
+    """
+    axes = [a for a in range(3) if a != axis]
+    axis_a, axis_b = axes[0], axes[1]
+    facets = np.asarray(facets, dtype=np.float64)
+
+    min_distance: float | None = None
+    for triangle in facets:
+        clipped = clip_triangle_to_rect(triangle, axis_a, axis_b, rect)
+        if clipped.shape[0] == 0:
+            continue
+        travel = (clipped[:, axis] - face_coord) * direction
+        valid = travel[travel >= -_EPS]
+        if valid.size == 0:
+            continue
+        local_min = float(max(0.0, valid.min()))
+        if min_distance is None or local_min < min_distance:
+            min_distance = local_min
+
+    return min_distance
+
+
 class MeshDistanceCalculator:
     """KD-treeを使った高速なメッシュ距離計算クラス。
 

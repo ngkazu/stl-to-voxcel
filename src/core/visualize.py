@@ -93,13 +93,14 @@ def _cells_to_mesh(model: VoxelModel, cells: list[Cell]) -> pv.UnstructuredGrid:
     if n == 0:
         return pv.UnstructuredGrid()
 
-    # 各セルの origin / size を取得
+    # 各セルの origin / size を取得（shrink後は cell_face_positions が実際の位置を返す）
     origins = np.empty((n, 3), dtype=np.float64)
     sizes = np.empty((n, 3), dtype=np.float64)
     for i, cell in enumerate(cells):
-        origin, size = model.cell_origin_size(cell)
+        face_positions = model.cell_face_positions(cell)
+        origin = face_positions[0::2]  # [min_x, min_y, min_z]
         origins[i] = origin
-        sizes[i] = size
+        sizes[i] = face_positions[1::2] - origin  # [max_x-min_x, max_y-min_y, max_z-min_z]
 
     # 各セルの8頂点オフセット（単位立方体）: VTK HEXAHEDRON の頂点順
     # 0:(0,0,0) 1:(1,0,0) 2:(1,1,0) 3:(0,1,0) 4:(0,0,1) 5:(1,0,1) 6:(1,1,1) 7:(0,1,1)

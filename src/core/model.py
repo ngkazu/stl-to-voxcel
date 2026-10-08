@@ -143,6 +143,26 @@ def code_to_grid_index(code: int) -> tuple[int, int, int]:
     return i, j, k
 
 
+def neighbor_code(code: int, axis: int, direction: int) -> int | None:
+    """指定セルの、同一depthでの隣接セルのcodeを返す（Samet法）。
+
+    Args:
+        code: 対象セルのlocational code
+        axis: 軸 (0=X, 1=Y, 2=Z)
+        direction: 方向 (+1 または -1)
+
+    Returns:
+        隣接セルのcode。境界外（グリッド範囲外）ならNone。
+    """
+    depth = code_depth(code)
+    index = list(code_to_grid_index(code))
+    index[axis] += direction
+    dim = 1 << depth
+    if not (0 <= index[axis] < dim):
+        return None  # 境界外
+    return code_from_grid_index((index[0], index[1], index[2]), depth)
+
+
 # ---------------------------------------------------------------------------
 # Cell / VoxelModel
 # ---------------------------------------------------------------------------
@@ -159,6 +179,9 @@ class Cell:
     code: int  # locational code（方式2）
     state: CellState  # 状態
     facet_indices: tuple[int, ...] | None = None  # 交差するSTL面番号（SHELLのみ）
+    # shrink用: 6面の実際の位置 [min_x,max_x,min_y,max_y,min_z,max_z]（絶対座標）
+    # Noneの場合はcodeから計算した元のorigin/size由来の位置を使う
+    face_positions: np.ndarray | None = None
 
     @property
     def depth(self) -> int:
@@ -191,6 +214,50 @@ class VoxelModel:
     def cell_max_corner(self, cell: Cell) -> np.ndarray:
         origin, size = self.cell_origin_size(cell)
         return origin + size
+
+    def cell_face_positions(self, cell: Cell) -> np.ndarray:
+        """セルの6面の実際の位置 [min_x,max_x,min_y,max_y,min_z,max_z] を返す。
+
+        cell.face_positions が設定されていれば（shrink後）それを返す。
+        未設定ならcodeから計算した元のorigin/sizeに由来する位置を返す。
+        """
+        if cell.face_positions is not None:
+            return cell.face_positions
+        origin, size = self.cell_origin_size(cell)
+        return np.array(
+            [
+                origin[0],
+                origin[0] + size[0],
+                origin[1],
+                origin[1] + size[1],
+                origin[2],
+                origin[2] + size[2],
+            ]
+        )
+
+    # ---- 隣接探索 ----
+
+    def get_neighbor_state(self, cell: Cell, axis: int, direction: int) -> CellState | None:
+        """指定方向の隣接セルの状態を返す。
+
+        同一depthに隣接セルが登録されていない場合は、より大きい親セルを辿る
+        （8分木で異なるサイズのセルが混在する場合に対応）。
+
+        Returns:
+            CellState: 隣接位置（またはその祖先）にセルが登録されている場合
+            None: 境界外、またはどの祖先も登録されていない（EMPTY扱い）
+        """
+        neighbor = neighbor_code(cell.code, axis, direction)
+        if neighbor is None:
+            return None  # 境界外 = 外殻面扱い
+
+        code = neighbor
+        while True:
+            if code in self.cells:
+                return self.cells[code].state
+            if code == ROOT_CODE:
+                return None  # どの祖先にも登録セルが無い = EMPTY扱い
+            code = code_parent(code)
 
     # ---- セル取得 ----
 

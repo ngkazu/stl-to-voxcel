@@ -8,6 +8,7 @@ import sys
 import numpy as np
 
 from core.octree import build_voxel_model
+from core.shrink import shrink_model
 from core.solid_fill import fill_solid
 from core.stl_loader import load_stl
 from core.visualize import show_model
@@ -37,6 +38,11 @@ def main(argv: list[str] | None = None) -> int:
         "--cross-section",
         action="store_true",
         help="ドラッグ可能な平面ウィジェットで断面を確認できるようにする",
+    )
+    parser.add_argument(
+        "--shrink",
+        action="store_true",
+        help="SHELLセルの外殻面をSTL表面まで縮める（greedy meshing+面積ベースのスイープ距離計算）",
     )
     args = parser.parse_args(argv)
 
@@ -69,7 +75,10 @@ def main(argv: list[str] | None = None) -> int:
         min_cell_size = model.get_min_cell_size()
         fill_solid(model, min_cell_size)
         print(f"cells (inside): {model.inside_count}")
-
+    # 外殻面をSTL表面まで縮める
+    if args.shrink:
+        shrink_model(model, facets)
+        print("shrink: done")
     # 統計表示
     print(f"total cells: {model.cell_count}")
 

@@ -15,6 +15,7 @@ from core.model import (
     code_parent,
     code_to_grid_index,
     code_to_origin_size,
+    neighbor_code,
     octant_from_bits,
 )
 
@@ -178,3 +179,128 @@ class TestVoxelModel:
         c = code_child(code_child(ROOT_CODE, 0), 0)
         model.add_cell(Cell(code=c, state=CellState.SHELL))
         assert np.allclose(model.get_min_cell_size(), [2.0, 2.0, 2.0])
+
+
+class TestNeighborCode:
+    """neighbor_code（同一depthでの隣接セル探索）のテスト。"""
+
+    def test_neighbor_code_same_depth(self):
+        depth = 2
+        code = code_from_grid_index((1, 1, 1), depth)
+
+        n = neighbor_code(code, axis=0, direction=1)
+        assert n is not None
+        assert code_to_grid_index(n) == (2, 1, 1)
+        assert code_depth(n) == depth
+
+        n = neighbor_code(code, axis=0, direction=-1)
+        assert code_to_grid_index(n) == (0, 1, 1)
+
+        n = neighbor_code(code, axis=1, direction=1)
+        assert code_to_grid_index(n) == (1, 2, 1)
+
+        n = neighbor_code(code, axis=2, direction=-1)
+        assert code_to_grid_index(n) == (1, 1, 0)
+
+    def test_neighbor_code_boundary_returns_none(self):
+        depth = 2
+        dim = 2**depth
+        code_min = code_from_grid_index((0, 0, 0), depth)
+        assert neighbor_code(code_min, axis=0, direction=-1) is None
+        assert neighbor_code(code_min, axis=1, direction=-1) is None
+        assert neighbor_code(code_min, axis=2, direction=-1) is None
+
+        code_max = code_from_grid_index((dim - 1, dim - 1, dim - 1), depth)
+        assert neighbor_code(code_max, axis=0, direction=1) is None
+        assert neighbor_code(code_max, axis=1, direction=1) is None
+        assert neighbor_code(code_max, axis=2, direction=1) is None
+
+    def test_neighbor_code_root_has_no_neighbor(self):
+        # ルート(depth=0)は単一セルなので、どの方向も境界外
+        assert neighbor_code(ROOT_CODE, axis=0, direction=1) is None
+        assert neighbor_code(ROOT_CODE, axis=0, direction=-1) is None
+
+
+class TestGetNeighborState:
+    """VoxelModel.get_neighbor_state のテスト。"""
+
+    def _empty_model(self) -> VoxelModel:
+        return VoxelModel(
+            bbox_min=np.array([0.0, 0.0, 0.0]),
+            base_cell_size=np.array([8.0, 8.0, 8.0]),
+        )
+
+    def test_same_depth_neighbor_found(self):
+        model = self._empty_model()
+        depth = 2
+        cell_a = Cell(code=code_from_grid_index((1, 1, 1), depth), state=CellState.SHELL)
+        model.add_cell(cell_a)
+        model.add_cell(Cell(code=code_from_grid_index((2, 1, 1), depth), state=CellState.INSIDE))
+
+        assert model.get_neighbor_state(cell_a, axis=0, direction=1) == CellState.INSIDE
+
+    def test_boundary_returns_none(self):
+        model = self._empty_model()
+        depth = 2
+        cell_a = Cell(code=code_from_grid_index((0, 0, 0), depth), state=CellState.SHELL)
+        model.add_cell(cell_a)
+
+        assert model.get_neighbor_state(cell_a, axis=0, direction=-1) is None
+
+    def test_unregistered_neighbor_with_no_ancestor_returns_none(self):
+        model = self._empty_model()
+        depth = 2
+        cell_a = Cell(code=code_from_grid_index((1, 1, 1), depth), state=CellState.SHELL)
+        model.add_cell(cell_a)
+
+        # 隣接(2,1,1)もその祖先も未登録 -> EMPTY扱いでNone
+        assert model.get_neighbor_state(cell_a, axis=0, direction=1) is None
+
+    def test_falls_back_to_parent_when_same_depth_missing(self):
+        model = self._empty_model()
+        depth2 = 2
+        cell_a = Cell(code=code_from_grid_index((1, 1, 1), depth2), state=CellState.SHELL)
+        model.add_cell(cell_a)
+
+        # 隣接(2,1,1)のdepth2セルは登録せず、その親(depth1)だけ登録する
+        neighbor_d2 = code_from_grid_index((2, 1, 1), depth2)
+        model.add_cell(Cell(code=code_parent(neighbor_d2), state=CellState.OUTSIDE))
+
+        assert model.get_neighbor_state(cell_a, axis=0, direction=1) == CellState.OUTSIDE
+
+
+class TestCellFacePositions:
+    """VoxelModel.cell_face_positions のテスト。"""
+
+    def test_default_matches_origin_size(self):
+        model = VoxelModel(
+            bbox_min=np.array([0.0, 0.0, 0.0]),
+            base_cell_size=np.array([8.0, 8.0, 8.0]),
+        )
+        cell = Cell(code=code_child(ROOT_CODE, 0), state=CellState.SHELL)
+        model.add_cell(cell)
+
+        positions = model.cell_face_positions(cell)
+        origin, size = model.cell_origin_size(cell)
+        expected = np.array(
+            [
+                origin[0],
+                origin[0] + size[0],
+                origin[1],
+                origin[1] + size[1],
+                origin[2],
+                origin[2] + size[2],
+            ]
+        )
+        assert np.allclose(positions, expected)
+
+    def test_explicit_face_positions_override_default(self):
+        model = VoxelModel(
+            bbox_min=np.array([0.0, 0.0, 0.0]),
+            base_cell_size=np.array([8.0, 8.0, 8.0]),
+        )
+        custom = np.array([0.0, 3.5, 0.0, 4.0, 0.0, 4.0])
+        cell = Cell(code=code_child(ROOT_CODE, 0), state=CellState.SHELL, face_positions=custom)
+        model.add_cell(cell)
+
+        assert np.allclose(model.cell_face_positions(cell), custom)
