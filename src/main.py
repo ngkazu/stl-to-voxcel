@@ -28,9 +28,10 @@ def main(argv: list[str] | None = None) -> int:
         help="ルートのbboxを最大辺に合わせた立方体に拡張してから分割する（軸ごとの分解能偏りを防ぐ）",
     )
     parser.add_argument(
-        "--solid-fill",
-        action="store_true",
-        help="外側からのフラッドフィル+パリティ判定で内部を充塡する（入れ子の空洞は空気のまま残す）",
+        "--no-solid-fill",
+        dest="solid_fill",
+        action="store_false",
+        help="内部充塡（solid-fill）を行わない（デフォルトは充塡する）",
     )
     parser.add_argument(
         "--cross-section",
