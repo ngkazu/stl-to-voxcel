@@ -5,6 +5,10 @@
 そこで、空セルを6連結の連結成分（領域）に分け、領域同士がシェルセルを挟んで隣接する
 関係をグラフとして辿り、外側からの「シェル通過回数」の偶奇（パリティ）を求める。
 奇数回通過した領域=材質（ソリッド）、偶数回（0を除く）=入れ子の空洞（空気のまま）とする。
+
+充填セルは locational code で表現する。ラスタライズ格子は 8 分木の最大 depth の
+グリッド（モデルの bbox_min を原点、最小セルサイズ単位）に整列させ、グリッド
+インデックス (i,j,k) から code を復元する（docs/data_structure.md 参照）。
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from collections import deque
 
 import numpy as np
 
-from core.model import Cell, CellState, VoxelModel
+from core.model import Cell, CellState, VoxelModel, code_from_grid_index
 
 _UNLABELED = -1
 _NEIGHBOR_OFFSETS = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
@@ -27,18 +31,20 @@ def fill_solid(model: VoxelModel, cell_size: np.ndarray) -> None:
 
     Args:
         model: VoxelModel（SHELLセルが登録済み）
-        cell_size: 充填セルのサイズ [sx, sy, sz]（軸ごとに異なりうる）
+        cell_size: 充填セルのサイズ [sx, sy, sz]（= 最大 depth のセルサイズ）
     """
     cell_size = np.asarray(cell_size, dtype=np.float64)
     shell_cells = model.get_shell_cells()
     if not shell_cells:
         return
 
-    # bboxを計算
-    all_min = np.min([c.min_corner for c in shell_cells], axis=0)
-    all_max = np.max([c.max_corner for c in shell_cells], axis=0)
+    # 充填格子の depth（最小セルサイズ = base_cell_size / 2**depth）
+    fill_depth = model.max_depth()
 
-    occupancy, origin = _rasterize_shell(shell_cells, all_min, all_max, cell_size)
+    # ラスタライズ: モデルの bbox_min を基準に、1セル分のパディングを加えた格子を作る。
+    # グリッドは 8分木の最大 depth グリッドに整列している（原点は bbox_min - 1セル）。
+    occupancy = _rasterize_shell(model, shell_cells, cell_size)
+
     region_labels, num_regions = _label_empty_regions(occupancy)
     if num_regions == 0:
         return
@@ -48,12 +54,20 @@ def fill_solid(model: VoxelModel, cell_size: np.ndarray) -> None:
     solid_regions = {region for region, p in parity.items() if p % 2 == 1}
 
     # INSIDEセルを追加
+    # occupancy のインデックスは [パディング1セル] オフセットされているため、
+    # 8分木グリッドインデックスに戻してから code を計算する。
+    grid_dim = 2**fill_depth
     for index in np.argwhere(np.isin(region_labels, list(solid_regions))):
-        cell_origin = origin + index * cell_size
+        # パディング分(-1)を引いて 8分木グリッド座標に変換
+        gi = int(index[0]) - 1
+        gj = int(index[1]) - 1
+        gk = int(index[2]) - 1
+        # 8分木グリッドの範囲外（パディング領域）はスキップ
+        if not (0 <= gi < grid_dim and 0 <= gj < grid_dim and 0 <= gk < grid_dim):
+            continue
+        code = code_from_grid_index((gi, gj, gk), fill_depth)
         cell = Cell(
-            origin=cell_origin,
-            size=cell_size.copy(),
-            depth=-1,  # 充填セルはdepth不定（8分木由来ではない）
+            code=code,
             state=CellState.INSIDE,
             facet_indices=None,
         )
@@ -61,30 +75,45 @@ def fill_solid(model: VoxelModel, cell_size: np.ndarray) -> None:
 
 
 def _rasterize_shell(
+    model: VoxelModel,
     cells: list[Cell],
-    bbox_min: np.ndarray,
-    bbox_max: np.ndarray,
     cell_size: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """シェルセル群を、一様格子のbool占有グリッド（True=シェル）にラスタライズする。
+) -> np.ndarray:
+    """シェルセル群を、8分木グリッドに整列した占有グリッド（True=シェル）にする。
 
-    bboxの外周に1セル分のpaddingを追加する。「外側」判定はグリッド境界面の空セルを
-    頼りにしており、bboxがモデルにぴったり密着している（余白がない）とそれが成立しないため。
+    グリッドは 8分木の最大 depth グリッド（2**depth セル/軸）に、外周1セルの
+    パディングを加えたもの。原点は bbox_min - cell_size（パディング分）。
+    「外側」判定はグリッド境界面の空セルを頼りにしているため、パディングが必要。
 
-    cell_size は [sx, sy, sz] の配列で、軸ごとに異なるサイズを許容する。
+    occupancy のインデックス (i,j,k) と 8分木グリッド (gi,gj,gk) の関係:
+        gi = i - 1  （パディング1セル分のオフセット）
     """
     cell_size = np.asarray(cell_size, dtype=np.float64)
-    bbox_min = np.asarray(bbox_min, dtype=np.float64) - cell_size
-    bbox_max = np.asarray(bbox_max, dtype=np.float64) + cell_size
-    shape = np.maximum(np.ceil((bbox_max - bbox_min) / cell_size).astype(int), 1)
+    fill_depth = model.max_depth()
+    grid_dim = 2**fill_depth
+
+    # パディング1セルを含む格子形状（全軸 grid_dim + 2）
+    shape = np.array([grid_dim + 2, grid_dim + 2, grid_dim + 2], dtype=int)
     occupancy = np.zeros(tuple(shape), dtype=bool)
 
+    # 各 SHELL セルを、その depth に応じて占有グリッドに塗る。
+    # セルは最大 depth とは限らない（大きいセルは複数グリッドセルを覆う）。
+    bbox_min = np.asarray(model.bbox_min, dtype=np.float64)
     for cell in cells:
-        lo = np.clip(np.floor((cell.min_corner - bbox_min) / cell_size).astype(int), 0, shape - 1)
-        hi = np.clip(np.ceil((cell.max_corner - bbox_min) / cell_size).astype(int), 1, shape)
-        occupancy[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]] = True
+        origin, size = model.cell_origin_size(cell)
+        # 8分木グリッド座標（最大 depth 基準）での範囲
+        lo = np.floor((origin - bbox_min) / cell_size + 1e-9).astype(int)
+        hi = np.ceil((origin + size - bbox_min) / cell_size - 1e-9).astype(int)
+        lo = np.clip(lo, 0, grid_dim)
+        hi = np.clip(hi, 0, grid_dim)
+        # パディング分(+1)オフセットして占有を立てる
+        occupancy[
+            lo[0] + 1 : hi[0] + 1,
+            lo[1] + 1 : hi[1] + 1,
+            lo[2] + 1 : hi[2] + 1,
+        ] = True
 
-    return occupancy, bbox_min
+    return occupancy
 
 
 def _label_empty_regions(occupancy: np.ndarray) -> tuple[np.ndarray, int]:
@@ -186,26 +215,3 @@ def _compute_region_parity(
         parity.setdefault(region, 1)
 
     return parity
-
-
-def rasterize_model(
-    model: VoxelModel,
-    cell_size: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """VoxelModelを一様格子のbool占有グリッドにラスタライズする。
-
-    Args:
-        model: VoxelModel
-        cell_size: セルサイズ [sx, sy, sz]（軸ごとに異なりうる）
-
-    Returns:
-        (占有グリッド, グリッド原点座標)
-    """
-    occupied_cells = model.get_occupied_cells()
-    if not occupied_cells:
-        return np.zeros((1, 1, 1), dtype=bool), model.origin.copy()
-
-    all_min = np.min([c.min_corner for c in occupied_cells], axis=0)
-    all_max = np.max([c.max_corner for c in occupied_cells], axis=0)
-
-    return _rasterize_shell(occupied_cells, all_min, all_max, cell_size)

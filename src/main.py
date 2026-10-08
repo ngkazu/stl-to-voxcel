@@ -7,7 +7,6 @@ import sys
 
 import numpy as np
 
-from core.expand import expand_model
 from core.octree import build_voxel_model
 from core.solid_fill import fill_solid
 from core.stl_loader import load_stl
@@ -38,12 +37,6 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="ドラッグ可能な平面ウィジェットで断面を確認できるようにする",
     )
-    parser.add_argument(
-        "--expand",
-        type=float,
-        default=None,
-        help="Voxel群を外側に膨張させ、STL表面から指定距離以上離れることを保証する",
-    )
     args = parser.parse_args(argv)
 
     # STL読み込み
@@ -62,25 +55,19 @@ def main(argv: list[str] | None = None) -> int:
     # cubic_root無しだと非立方体になりうるため、軸ごとに確認できるようにする
     shell_cells = model.get_shell_cells()
     if shell_cells:
-        sizes = np.array([c.size for c in shell_cells])
+        sizes = np.array([model.cell_origin_size(c)[1] for c in shell_cells])
         unique_sizes, counts = np.unique(sizes, axis=0, return_counts=True)
         print(f"cells (shell) sizes: {len(unique_sizes)} unique")
         for size, count in zip(unique_sizes, counts, strict=True):
             print(f"  size=[{size[0]:.4g}, {size[1]:.4g}, {size[2]:.4g}] x {count}")
 
     # 内部充填
-    if args.solid_fill or args.expand is not None:
-        # 充填・膨張の格子セルサイズ（SHELLセルの最小サイズ、各軸）
+    if args.solid_fill:
+        # 充填の格子セルサイズ（SHELLセルの最小サイズ、各軸）
         # cubic_root無しだと非立方体になりうるため np.ndarray で扱う
         min_cell_size = model.get_min_cell_size()
         fill_solid(model, min_cell_size)
         print(f"cells (inside): {model.inside_count}")
-
-        # 膨張処理
-        if args.expand is not None:
-            print(f"expand distance: {args.expand}")
-            expand_model(model, facets, args.expand, min_cell_size)
-            print(f"cells (outside): {model.outside_count}")
 
     # 統計表示
     print(f"total cells: {model.cell_count}")

@@ -8,7 +8,7 @@ from collections import deque
 import numpy as np
 
 from core.geometry import triangle_box_overlap_batch
-from core.model import Cell, CellState, VoxelModel
+from core.model import ROOT_CODE, Cell, CellState, VoxelModel, code_child
 
 logger = logging.getLogger(__name__)
 
@@ -48,27 +48,32 @@ def build_voxel_model(
     if cubic_root:
         bbox_min, bbox_max = make_cubic_bbox(bbox_min, bbox_max)
 
-    # base_cell_size: ルート（depth=0）のセルサイズ
-    base_cell_size = float((bbox_max - bbox_min).max())
+    # base_cell_size: ルート（depth=0）のセルサイズ [sx, sy, sz]
+    # cubic_root無しだと非立方体（軸ごとに異なる）になりうる。
+    base_cell_size = (bbox_max - bbox_min).astype(np.float64)
 
     model = VoxelModel(
-        origin=bbox_min.copy(),
-        base_cell_size=base_cell_size,
-        cells=[],
+        bbox_min=bbox_min.copy(),
+        base_cell_size=base_cell_size.copy(),
+        cells={},
     )
 
     all_facet_indices = np.arange(len(facets))
-    queue: deque[tuple[np.ndarray, np.ndarray, np.ndarray, int]] = deque()
-    queue.append((bbox_min, bbox_max, all_facet_indices, 0))
+    # キュー要素: (min_corner, max_corner, candidate_indices, depth, code)
+    queue: deque[tuple[np.ndarray, np.ndarray, np.ndarray, int, int]] = deque()
+    queue.append((bbox_min, bbox_max, all_facet_indices, 0, ROOT_CODE))
 
     while queue:
-        min_corner, max_corner, candidate_indices, depth = queue.popleft()
-        for child_min, child_max in _split_octants(min_corner, max_corner):
+        min_corner, max_corner, candidate_indices, depth, code = queue.popleft()
+        # _split_octants は for ix: for iy: for iz: の順で返すため、
+        # enumerate のインデックスがそのまま octant 番号 (ix<<2)|(iy<<1)|iz になる。
+        for octant, (child_min, child_max) in enumerate(_split_octants(min_corner, max_corner)):
             hit_indices = _intersecting_facets(child_min, child_max, facets, candidate_indices)
             if len(hit_indices) == 0:
                 continue  # flag0: 交差なし -> 破棄
 
             child_depth = depth + 1
+            child_code = code_child(code, octant)
             # 各軸のサイズ [sx, sy, sz]（cubic_root無しだと非立方体になりうる）
             child_size = child_max - child_min
             # 分割判定は3辺の平均を基準にする（平均がvoxel_size以下になったら確定）
@@ -77,16 +82,14 @@ def build_voxel_model(
             if mean_edge <= voxel_size:
                 # flag1: 確定 → SHELLセルとして追加
                 cell = Cell(
-                    origin=child_min.copy(),
-                    size=child_size.copy(),
-                    depth=child_depth,
+                    code=child_code,
                     state=CellState.SHELL,
                     facet_indices=tuple(hit_indices.tolist()),
                 )
                 model.add_cell(cell)
             elif child_depth < max_depth:
                 # flag2: 再分割
-                queue.append((child_min, child_max, hit_indices, child_depth))
+                queue.append((child_min, child_max, hit_indices, child_depth, child_code))
             else:
                 # 深さ上限に到達 → 強制確定
                 logger.warning(
@@ -97,9 +100,7 @@ def build_voxel_model(
                     child_max,
                 )
                 cell = Cell(
-                    origin=child_min.copy(),
-                    size=child_size.copy(),
-                    depth=child_depth,
+                    code=child_code,
                     state=CellState.SHELL,
                     facet_indices=tuple(hit_indices.tolist()),
                 )

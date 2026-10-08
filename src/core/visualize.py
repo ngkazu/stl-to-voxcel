@@ -39,15 +39,21 @@ def show_model(
     outside_cells = model.get_outside_cells()
 
     if shell_cells:
-        actor = add(_cells_to_mesh(shell_cells), color="orange", opacity=0.5, show_edges=True)
+        actor = add(
+            _cells_to_mesh(model, shell_cells), color="orange", opacity=0.5, show_edges=True
+        )
         sliders.append((actor, "Shell opacity", 0.5))
 
     if inside_cells:
-        actor = add(_cells_to_mesh(inside_cells), color="green", opacity=0.6, show_edges=True)
+        actor = add(
+            _cells_to_mesh(model, inside_cells), color="green", opacity=0.6, show_edges=True
+        )
         sliders.append((actor, "Inside opacity", 0.6))
 
     if outside_cells:
-        actor = add(_cells_to_mesh(outside_cells), color="blue", opacity=0.4, show_edges=True)
+        actor = add(
+            _cells_to_mesh(model, outside_cells), color="blue", opacity=0.4, show_edges=True
+        )
         sliders.append((actor, "Outside opacity", 0.4))
 
     if facets is not None and len(facets) > 0:
@@ -77,22 +83,56 @@ def _add_opacity_sliders(plotter: pv.Plotter, sliders: list[tuple[pv.Actor, str,
         )
 
 
-def _cells_to_mesh(cells: list[Cell]) -> pv.UnstructuredGrid:
-    """Cellごとのboxを1つのメッシュに統合する。"""
-    boxes = [
-        pv.Box(
-            bounds=(
-                cell.min_corner[0],
-                cell.max_corner[0],
-                cell.min_corner[1],
-                cell.max_corner[1],
-                cell.min_corner[2],
-                cell.max_corner[2],
-            )
-        )
-        for cell in cells
-    ]
-    return pv.MultiBlock(boxes).combine()
+def _cells_to_mesh(model: VoxelModel, cells: list[Cell]) -> pv.UnstructuredGrid:
+    """Cellごとの直方体を1つのUnstructuredGridに統合する。
+
+    pv.Box を大量生成すると遅いため、全セルの8頂点と六面体(hexahedron)接続を
+    numpy配列で直接構築し、一括で UnstructuredGrid を作る。
+    """
+    n = len(cells)
+    if n == 0:
+        return pv.UnstructuredGrid()
+
+    # 各セルの origin / size を取得
+    origins = np.empty((n, 3), dtype=np.float64)
+    sizes = np.empty((n, 3), dtype=np.float64)
+    for i, cell in enumerate(cells):
+        origin, size = model.cell_origin_size(cell)
+        origins[i] = origin
+        sizes[i] = size
+
+    # 各セルの8頂点オフセット（単位立方体）: VTK HEXAHEDRON の頂点順
+    # 0:(0,0,0) 1:(1,0,0) 2:(1,1,0) 3:(0,1,0) 4:(0,0,1) 5:(1,0,1) 6:(1,1,1) 7:(0,1,1)
+    unit = np.array(
+        [
+            [0, 0, 0],
+            [1, 0, 0],
+            [1, 1, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+            [1, 0, 1],
+            [1, 1, 1],
+            [0, 1, 1],
+        ],
+        dtype=np.float64,
+    )
+
+    # 全頂点を計算: (n, 8, 3) -> (n*8, 3)
+    points = origins[:, None, :] + unit[None, :, :] * sizes[:, None, :]
+    points = points.reshape(-1, 3)
+
+    # セル接続配列: 各セル [8, p0, p1, ..., p7]
+    base = np.arange(n, dtype=np.int64) * 8
+    connectivity = np.empty((n, 9), dtype=np.int64)
+    connectivity[:, 0] = 8  # 頂点数
+    connectivity[:, 1:] = base[:, None] + np.arange(8, dtype=np.int64)[None, :]
+    cells_array = connectivity.ravel()
+
+    from vtkmodules.util.vtkConstants import VTK_HEXAHEDRON  # noqa: PLC0415
+
+    cell_types = np.full(n, VTK_HEXAHEDRON, dtype=np.uint8)
+
+    return pv.UnstructuredGrid(cells_array, cell_types, points)
 
 
 def _facets_to_polydata(facets: np.ndarray) -> pv.PolyData:
