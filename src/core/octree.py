@@ -71,10 +71,10 @@ def build_voxel_model(
             child_depth = depth + 1
             # 各軸のサイズ [sx, sy, sz]（cubic_root無しだと非立方体になりうる）
             child_size = child_max - child_min
-            # 分割判定は最大辺を基準にする（全軸がvoxel_size以下になったら確定）
-            max_edge = float(child_size.max())
+            # 分割判定は3辺の平均を基準にする（平均がvoxel_size以下になったら確定）
+            mean_edge = float(child_size.mean())
 
-            if max_edge <= voxel_size:
+            if mean_edge <= voxel_size:
                 # flag1: 確定 → SHELLセルとして追加
                 cell = Cell(
                     origin=child_min.copy(),
