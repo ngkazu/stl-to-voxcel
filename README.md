@@ -71,8 +71,8 @@ Options:
 | `--cubic-root` | Expand the root bounding box to a cube (longest edge, same center) before subdividing, so every Voxel is a cube instead of inheriting the STL's aspect ratio. |
 | `--no-solid-fill` | Produce a shell-only voxelization (skip the interior fill). By default the interior is filled; nested cavities are correctly left empty (see "What it does" above). |
 | `--shrink` | Shrink SHELL outer faces inward to touch the STL surface (greedy-merged faces + area-based sweep distance). See `src/core/shrink.py`. |
-| `--export-stl PATH` | Write the SHELL+INSIDE boundary faces (faces touching EMPTY/OUTSIDE/non-existent cells) to `PATH` as an STL file. Internal faces between occupied cells are excluded. |
-| `--export-merge` | With `--export-stl`, greedy-merge coplanar adjacent faces before triangulating instead of emitting one quad per cell (default). Merging can leave gaps at edges/corners after `--shrink` since neighboring merged faces are shrunk independently; use the per-cell default if you see holes. |
+| `--export-stl PATH` | Write every face of every SHELL+INSIDE cell to `PATH` as an STL file (one full box per voxel, including internal faces between touching cells). Intended as a box-soup intermediate for a later Boolean Union / solidify step. |
+| `--export-merge` | With `--export-stl`, output only the boundary faces (faces touching EMPTY/OUTSIDE/non-existent cells) instead of every face. Lighter-weight but can leave gaps at edges/corners after `--shrink` (see Known limitations). |
 | `--cross-section` | Replace static rendering with an interactive, draggable clip-plane widget so you can see inside the shell/fill. |
 | `--no-visualize` | Skip opening the PyVista window (useful for scripted/headless runs). |
 
@@ -116,9 +116,10 @@ pytest tests -v               # Run tests
   detect "outside" (handled internally via automatic 1-cell padding) and assumes
   each nested shell layer is a properly closed (watertight) surface; a non-watertight
   mesh can produce incorrect parity results. Use `--no-solid-fill` for a shell-only result.
-- `--export-stl` after `--shrink` can produce a non-watertight ("holey") mesh: shrink
-  moves each outer face inward independently, so two adjacent outer faces of the same
-  cell (e.g. at a corner/edge of the model) can end up offset from each other with no
-  geometry filling the gap between them. A true solid union of the Voxel boxes (rather
-  than a merged-face STL) is being considered as a follow-up to avoid this.
+- `--export-stl --export-merge` after `--shrink` can produce a non-watertight ("holey")
+  mesh: shrink moves each outer face inward independently, so two adjacent outer faces
+  of the same cell (e.g. at a corner/edge of the model) can end up offset from each
+  other with no geometry filling the gap between them. The default `--export-stl`
+  (every face per cell, box-soup) is meant to feed a later Boolean Union / solidify
+  step instead, which is being considered as a follow-up to avoid this.
 - `visualize.py` requires a display and is not covered by automated tests.

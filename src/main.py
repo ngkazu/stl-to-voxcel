@@ -48,12 +48,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--export-stl",
         metavar="PATH",
-        help="SHELL+INSIDEセルの境界面だけをSTLとして指定パスに書き出す",
+        help="SHELL+INSIDEセルをSTLとして指定パスに書き出す（デフォルトは各セルの全6面を個別出力）",
     )
     parser.add_argument(
         "--export-merge",
         action="store_true",
-        help="--export-stlで面をgreedy mergingして出力する（デフォルトはセル単位の未マージ出力）",
+        help="--export-stlでOUTSIDE/EMPTYに接する境界面だけを出力する（内部面を除いた軽量出力、shrink後は歯抜けの可能性あり）",
     )
     args = parser.parse_args(argv)
 
@@ -92,9 +92,9 @@ def main(argv: list[str] | None = None) -> int:
         shrink_model(model, facets)
         print("shrink: done")
 
-    # SHELL+INSIDEセルの境界面をSTLとして書き出す
+    # SHELL+INSIDEセルをSTLとして書き出す
     if args.export_stl:
-        n_triangles = export_voxel_stl(model, args.export_stl, merge_faces=args.export_merge)
+        n_triangles = export_voxel_stl(model, args.export_stl, boundary_only=args.export_merge)
         print(f"export_stl: {args.export_stl} ({n_triangles} triangles)")
 
     # 統計表示

@@ -1,9 +1,10 @@
 """VoxelModel（SHELL+INSIDE）をSTLとして書き出す。
 
-shrinkで使うgreedy meshing（面のマージ、core.shrink.greedy_merge_faces）を再利用し、
-占有セル同士の内部面を除いた境界面（OUTSIDE/EMPTYと接する面）だけを三角形化して
-STL出力する。shrink済みのモデルであれば、cell_face_positions経由で縮小後の実形状が
-反映される。
+デフォルトでは各セルの全6面を個別に出力する（内部面も含むフルボックス出力）。
+後段でBoolean Union等によりソリッド化することを前提に、1セル=1個のボックスとして
+書き出す。boundary_only=True にすると、OUTSIDE/EMPTY/未登録に接する境界面だけを
+出力する（内部面を除いた軽量プレビュー用、shrink後は歯抜けが起きうる点に注意）。
+shrink済みのモデルであれば、cell_face_positions経由で縮小後の実形状が反映される。
 """
 
 from __future__ import annotations
@@ -12,26 +13,28 @@ import numpy as np
 from stl import mesh as stl_mesh
 
 from core.model import Cell, CellState, VoxelModel
-from core.shrink import MergedFace, greedy_merge_faces
+from core.shrink import MergedFace
 
 
-def export_voxel_stl(model: VoxelModel, path: str, merge_faces: bool = True) -> int:
-    """SHELL+INSIDEセルの境界面だけをSTLとして書き出し、出力した三角形数を返す。
+def export_voxel_stl(model: VoxelModel, path: str, boundary_only: bool = False) -> int:
+    """SHELL+INSIDEセルの面をSTLとして書き出し、出力した三角形数を返す。
 
-    merge_faces=False にすると、greedy mergingを行わずセル単位で面を出力する
-    （歯抜け原因の切り分け用）。
+    boundary_only=False（デフォルト）: 各セルの全6面を個別出力する。
+    boundary_only=True: OUTSIDE/EMPTY/未登録に接する境界面だけを出力する。
     """
     cells = model.get_shell_cells() + model.get_inside_cells()
 
     triangles: list[np.ndarray] = []
     for axis in range(3):
         for direction in (1, -1):
-            if merge_faces:
-                merged_faces = greedy_merge_faces(model, axis, direction, cells=cells)
-            else:
-                merged_faces = _unmerged_faces(model, cells, axis, direction)
-            for merged in merged_faces:
-                triangles.extend(_merged_face_to_triangles(merged))
+            for cell in cells:
+                if boundary_only:
+                    neighbor_state = model.get_neighbor_state(cell, axis, direction)
+                    if neighbor_state is not None and neighbor_state != CellState.OUTSIDE:
+                        continue  # 占有セルに接している内部面は除外
+                triangles.extend(
+                    _merged_face_to_triangles(_cell_face(model, cell, axis, direction))
+                )
 
     facets = np.array(triangles, dtype=np.float32)
     data = np.zeros(len(facets), dtype=stl_mesh.Mesh.dtype)
@@ -40,35 +43,23 @@ def export_voxel_stl(model: VoxelModel, path: str, merge_faces: bool = True) -> 
     return len(facets)
 
 
-def _unmerged_faces(
-    model: VoxelModel, cells: list[Cell], axis: int, direction: int
-) -> list[MergedFace]:
-    """セルごとに、マージせず境界面を1枚ずつ作る。"""
+def _cell_face(model: VoxelModel, cell: Cell, axis: int, direction: int) -> MergedFace:
+    """1セルの1面を（マージせず）MergedFace形式で返す。"""
     axes = [a for a in range(3) if a != axis]
     axis_a, axis_b = axes
-
-    faces = []
-    for cell in cells:
-        neighbor_state = model.get_neighbor_state(cell, axis, direction)
-        if neighbor_state is not None and neighbor_state != CellState.OUTSIDE:
-            continue  # 占有セルに接している内部面は除外
-
-        face_positions = model.cell_face_positions(cell)
-        a_min, a_max = face_positions[axis_a * 2], face_positions[axis_a * 2 + 1]
-        b_min, b_max = face_positions[axis_b * 2], face_positions[axis_b * 2 + 1]
-        axis_min, axis_max = face_positions[axis * 2], face_positions[axis * 2 + 1]
-        faces.append(
-            MergedFace(
-                axis=axis,
-                direction=direction,
-                rect=(a_min, a_max, b_min, b_max),
-                face_coord=axis_max if direction > 0 else axis_min,
-                cell_size_axis=axis_max - axis_min,
-                source_codes=(cell.code,),
-                facet_indices=cell.facet_indices or (),
-            )
-        )
-    return faces
+    face_positions = model.cell_face_positions(cell)
+    a_min, a_max = face_positions[axis_a * 2], face_positions[axis_a * 2 + 1]
+    b_min, b_max = face_positions[axis_b * 2], face_positions[axis_b * 2 + 1]
+    axis_min, axis_max = face_positions[axis * 2], face_positions[axis * 2 + 1]
+    return MergedFace(
+        axis=axis,
+        direction=direction,
+        rect=(a_min, a_max, b_min, b_max),
+        face_coord=axis_max if direction > 0 else axis_min,
+        cell_size_axis=axis_max - axis_min,
+        source_codes=(cell.code,),
+        facet_indices=cell.facet_indices or (),
+    )
 
 
 def _merged_face_to_triangles(face: MergedFace) -> list[np.ndarray]:
