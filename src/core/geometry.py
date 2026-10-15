@@ -75,17 +75,24 @@ def triangle_box_overlap_batch(
     separated = np.zeros(triangles.shape[0], dtype=bool)
 
     # 軸1-3: boxの3軸（x, y, z）
+    # 頂点数は常に3なので、.min(axis=1)/.max(axis=1)（汎用reduce）ではなく
+    # np.minimum/np.maximumの連鎖で求める（小さい配列ではreduceの呼び出しオーバーヘッドが大きい）
     for axis_index in range(3):
         proj = verts[:, :, axis_index]
         half = box_half_size[axis_index]
-        separated |= (proj.min(axis=1) > half) | (proj.max(axis=1) < -half)
+        proj_min = np.minimum(np.minimum(proj[:, 0], proj[:, 1]), proj[:, 2])
+        proj_max = np.maximum(np.maximum(proj[:, 0], proj[:, 1]), proj[:, 2])
+        separated |= (proj_min > half) | (proj_max < -half)
 
     edge0 = verts[:, 1] - verts[:, 0]
     edge1 = verts[:, 2] - verts[:, 1]
     edge2 = verts[:, 0] - verts[:, 2]
 
     # 軸4: 三角形の法線（平面-box交差判定）
-    normal = np.cross(edge0, edge1)
+    # np.crossは一般のベクトル対でも展開式の方が速いため、ここも置き換える
+    ax0, ay0, az0 = edge0[:, 0], edge0[:, 1], edge0[:, 2]
+    ax1, ay1, az1 = edge1[:, 0], edge1[:, 1], edge1[:, 2]
+    normal = np.stack([ay0 * az1 - az0 * ay1, az0 * ax1 - ax0 * az1, ax0 * ay1 - ay0 * ax1], axis=1)
     distance = np.einsum("ij,ij->i", normal, verts[:, 0])
     radius = np.abs(normal) @ box_half_size
     separated |= np.abs(distance) > radius
@@ -104,7 +111,9 @@ def triangle_box_overlap_batch(
             axis_len_sq = np.einsum("ij,ij->i", axis, axis)
             proj = np.einsum("mkj,mj->mk", verts, axis)
             axis_radius = np.abs(axis) @ box_half_size
-            sep_axis = (proj.min(axis=1) > axis_radius) | (proj.max(axis=1) < -axis_radius)
+            proj_min = np.minimum(np.minimum(proj[:, 0], proj[:, 1]), proj[:, 2])
+            proj_max = np.maximum(np.maximum(proj[:, 0], proj[:, 1]), proj[:, 2])
+            sep_axis = (proj_min > axis_radius) | (proj_max < -axis_radius)
             separated |= sep_axis & (axis_len_sq >= _EPS)
 
     return ~separated
