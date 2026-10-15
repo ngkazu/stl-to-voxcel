@@ -41,7 +41,7 @@ stl-to-voxcel/
       octree.py           # Octree subdivision -> VoxelModel (SHELL cells)
       solid_fill.py       # Interior fill via flood-fill + shell-crossing parity (INSIDE cells)
       shrink.py           # Shrink SHELL outer faces to the STL surface (greedy-merged faces + sweep distance)
-      export.py           # Export SHELL+INSIDE boundary faces as an STL file
+      export.py           # Export SHELL+INSIDE cell faces as an STL file (all/boundary/merged modes)
       visualize.py        # PyVista rendering (state-based colors, cross-section clip)
   tests/                  # pytest unit tests
   data/                   # Sample/test STL files
@@ -71,8 +71,8 @@ Options:
 | `--cubic-root` | Expand the root bounding box to a cube (longest edge, same center) before subdividing, so every Voxel is a cube instead of inheriting the STL's aspect ratio. |
 | `--no-solid-fill` | Produce a shell-only voxelization (skip the interior fill). By default the interior is filled; nested cavities are correctly left empty (see "What it does" above). |
 | `--shrink` | Shrink SHELL outer faces inward to touch the STL surface (greedy-merged faces + area-based sweep distance). See `src/core/shrink.py`. |
-| `--export-stl PATH` | Write every face of every SHELL+INSIDE cell to `PATH` as an STL file (one full box per voxel, including internal faces between touching cells). Intended as a box-soup intermediate for a later Boolean Union / solidify step. |
-| `--export-merge` | With `--export-stl`, output only the boundary faces (faces touching EMPTY/OUTSIDE/non-existent cells) instead of every face. Lighter-weight but can leave gaps at edges/corners after `--shrink` (see Known limitations). |
+| `--export-stl PATH` | Write SHELL+INSIDE cell faces to `PATH` as an STL file. See `--export-mode` for what gets written. |
+| `--export-mode {all,boundary,merged}` | Controls `--export-stl` output. `all` (default): every face of every cell (one full box per voxel, including internal faces between touching cells) — a box-soup intermediate meant for a later Boolean Union / solidify step. `boundary`: only the faces touching EMPTY/OUTSIDE/non-existent cells, one quad per cell (no merging). `merged`: same boundary faces, but coplanar adjacent faces are greedy-merged into larger rectangles first (fewer triangles). `boundary`/`merged` can leave gaps at edges/corners after `--shrink` (see Known limitations). |
 | `--cross-section` | Replace static rendering with an interactive, draggable clip-plane widget so you can see inside the shell/fill. |
 | `--no-visualize` | Skip opening the PyVista window (useful for scripted/headless runs). |
 
@@ -116,10 +116,10 @@ pytest tests -v               # Run tests
   detect "outside" (handled internally via automatic 1-cell padding) and assumes
   each nested shell layer is a properly closed (watertight) surface; a non-watertight
   mesh can produce incorrect parity results. Use `--no-solid-fill` for a shell-only result.
-- `--export-stl --export-merge` after `--shrink` can produce a non-watertight ("holey")
+- `--export-mode boundary` or `merged` after `--shrink` can produce a non-watertight ("holey")
   mesh: shrink moves each outer face inward independently, so two adjacent outer faces
   of the same cell (e.g. at a corner/edge of the model) can end up offset from each
-  other with no geometry filling the gap between them. The default `--export-stl`
+  other with no geometry filling the gap between them. The default `--export-mode all`
   (every face per cell, box-soup) is meant to feed a later Boolean Union / solidify
   step instead, which is being considered as a follow-up to avoid this.
 - `visualize.py` requires a display and is not covered by automated tests.

@@ -1,40 +1,49 @@
 """VoxelModel（SHELL+INSIDE）をSTLとして書き出す。
 
-デフォルトでは各セルの全6面を個別に出力する（内部面も含むフルボックス出力）。
-後段でBoolean Union等によりソリッド化することを前提に、1セル=1個のボックスとして
-書き出す。boundary_only=True にすると、OUTSIDE/EMPTY/未登録に接する境界面だけを
-出力する（内部面を除いた軽量プレビュー用、shrink後は歯抜けが起きうる点に注意）。
+`mode`で出力形式を切り替える:
+- "all"（デフォルト）: 各セルの全6面を個別に出力する（内部面も含むフルボックス出力）。
+  後段でBoolean Union等によりソリッド化することを前提に、1セル=1個のボックスとして書き出す。
+- "boundary": OUTSIDE/EMPTY/未登録に接する境界面だけを（マージせず）出力する。
+- "merged": 境界面を同一平面・同一サイズでgreedy meshマージしてから出力する
+  （三角形数を削減できるが、shrink後は角・エッジ部で歯抜けが起きうる）。
 shrink済みのモデルであれば、cell_face_positions経由で縮小後の実形状が反映される。
 """
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 from stl import mesh as stl_mesh
 
 from core.model import Cell, CellState, VoxelModel
-from core.shrink import MergedFace
+from core.shrink import MergedFace, greedy_merge_faces
+
+ExportMode = Literal["all", "boundary", "merged"]
 
 
-def export_voxel_stl(model: VoxelModel, path: str, boundary_only: bool = False) -> int:
-    """SHELL+INSIDEセルの面をSTLとして書き出し、出力した三角形数を返す。
-
-    boundary_only=False（デフォルト）: 各セルの全6面を個別出力する。
-    boundary_only=True: OUTSIDE/EMPTY/未登録に接する境界面だけを出力する。
-    """
+def export_voxel_stl(model: VoxelModel, path: str, mode: ExportMode = "all") -> int:
+    """SHELL+INSIDEセルの面をSTLとして書き出し、出力した三角形数を返す。"""
     cells = model.get_shell_cells() + model.get_inside_cells()
 
     triangles: list[np.ndarray] = []
-    for axis in range(3):
-        for direction in (1, -1):
-            for cell in cells:
-                if boundary_only:
-                    neighbor_state = model.get_neighbor_state(cell, axis, direction)
-                    if neighbor_state is not None and neighbor_state != CellState.OUTSIDE:
-                        continue  # 占有セルに接している内部面は除外
-                triangles.extend(
-                    _merged_face_to_triangles(_cell_face(model, cell, axis, direction))
-                )
+    if mode == "merged":
+        for axis in range(3):
+            for direction in (1, -1):
+                for merged in greedy_merge_faces(model, axis, direction, cells=cells):
+                    triangles.extend(_merged_face_to_triangles(merged))
+    else:
+        boundary_only = mode == "boundary"
+        for axis in range(3):
+            for direction in (1, -1):
+                for cell in cells:
+                    if boundary_only:
+                        neighbor_state = model.get_neighbor_state(cell, axis, direction)
+                        if neighbor_state is not None and neighbor_state != CellState.OUTSIDE:
+                            continue  # 占有セルに接している内部面は除外
+                    triangles.extend(
+                        _merged_face_to_triangles(_cell_face(model, cell, axis, direction))
+                    )
 
     facets = np.array(triangles, dtype=np.float32)
     data = np.zeros(len(facets), dtype=stl_mesh.Mesh.dtype)

@@ -52,7 +52,7 @@ def test_export_boundary_only_excludes_internal_face(tmp_path) -> None:
     model.add_cell(Cell(code=code_from_grid_index((1, 0, 0), depth), state=CellState.SHELL))
 
     out_path = tmp_path / "pair_boundary_only.stl"
-    n_triangles = export_voxel_stl(model, str(out_path), boundary_only=True)
+    n_triangles = export_voxel_stl(model, str(out_path), mode="boundary")
 
     # 内部面(x=1)は除外される。外側は(+X:1面 -X:1面 +-Y/+-Z:各2面)=10面 x 2三角形 = 20
     assert n_triangles == 20
@@ -68,10 +68,27 @@ def test_export_boundary_only_treats_inside_cells_like_shell(tmp_path) -> None:
     model.add_cell(Cell(code=code_from_grid_index((1, 0, 0), depth), state=CellState.SHELL))
 
     out_path = tmp_path / "mixed_boundary_only.stl"
-    n_triangles = export_voxel_stl(model, str(out_path), boundary_only=True)
+    n_triangles = export_voxel_stl(model, str(out_path), mode="boundary")
 
     # SHELL/INSIDEの区別なく「占有セル」として扱われ、内部面が除外される
     assert n_triangles == 20
+
+
+def test_export_merged_merges_adjacent_boundary_faces(tmp_path) -> None:
+    model = VoxelModel(
+        bbox_min=np.array([0.0, 0.0, 0.0]),
+        base_cell_size=np.array([2.0, 2.0, 2.0]),
+    )
+    depth = 1
+    # X方向に隣接する2セル。内部面(x=1)は除外され、外側4面もgreedy mergeで
+    # それぞれ1枚の矩形にまとまるため、合計は単一セルと同じ12三角形になる。
+    model.add_cell(Cell(code=code_from_grid_index((0, 0, 0), depth), state=CellState.SHELL))
+    model.add_cell(Cell(code=code_from_grid_index((1, 0, 0), depth), state=CellState.SHELL))
+
+    out_path = tmp_path / "pair_merged.stl"
+    n_triangles = export_voxel_stl(model, str(out_path), mode="merged")
+
+    assert n_triangles == 12
 
 
 def test_export_full_block_default_includes_all_internal_faces(tmp_path) -> None:
@@ -108,8 +125,28 @@ def test_export_full_block_boundary_only(tmp_path) -> None:
                 )
 
     out_path = tmp_path / "block_boundary_only.stl"
-    n_triangles = export_voxel_stl(model, str(out_path), boundary_only=True)
+    n_triangles = export_voxel_stl(model, str(out_path), mode="boundary")
 
     # 2x2x2の各セルは軸ごとに必ず片方の面だけが外側に露出する(1セルあたり3面)
     # 8セル x 3面 x 2三角形 = 48（マージはしない）
     assert n_triangles == 48
+
+
+def test_export_full_block_merged_collapses_to_single_box(tmp_path) -> None:
+    model = VoxelModel(
+        bbox_min=np.array([0.0, 0.0, 0.0]),
+        base_cell_size=np.array([2.0, 2.0, 2.0]),
+    )
+    depth = 1
+    for i in (0, 1):
+        for j in (0, 1):
+            for k in (0, 1):
+                model.add_cell(
+                    Cell(code=code_from_grid_index((i, j, k), depth), state=CellState.SHELL)
+                )
+
+    out_path = tmp_path / "block_merged.stl"
+    n_triangles = export_voxel_stl(model, str(out_path), mode="merged")
+
+    # 2x2x2セルがすべて埋まった立方体は、境界面をマージすれば1つの大きな箱と同じ
+    assert n_triangles == 12
