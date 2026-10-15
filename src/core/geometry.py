@@ -38,10 +38,15 @@ def triangle_box_overlap(
         return False
 
     # 軸5-13: boxの3軸 × 三角形の3辺 の外積
-    box_axes = np.eye(3)
+    # box軸は単位ベクトル([1,0,0]等)なので、np.crossではなく展開式で計算する
+    # （np.crossは汎用性のため、小さい配列に対する呼び出しオーバーヘッドが大きい）
     for edge in (edge0, edge1, edge2):
-        for box_axis in box_axes:
-            axis = np.cross(box_axis, edge)
+        ex, ey, ez = edge[0], edge[1], edge[2]
+        for axis in (
+            np.array([0.0, -ez, ey]),
+            np.array([ez, 0.0, -ex]),
+            np.array([-ey, ex, 0.0]),
+        ):
             if np.dot(axis, axis) < _EPS:
                 continue  # 辺とbox軸がほぼ平行で有効な分離軸にならない
             proj = vertices @ axis
@@ -86,10 +91,16 @@ def triangle_box_overlap_batch(
     separated |= np.abs(distance) > radius
 
     # 軸5-13: boxの3軸 × 三角形の3辺 の外積
-    box_axes = np.eye(3)
+    # box軸は単位ベクトル([1,0,0]等)なので、np.crossではなく展開式で計算する
+    # （np.crossは汎用性のため、小さい配列に対する呼び出しオーバーヘッドが大きい）
     for edge in (edge0, edge1, edge2):
-        for box_axis in box_axes:
-            axis = np.cross(box_axis, edge)
+        ex, ey, ez = edge[:, 0], edge[:, 1], edge[:, 2]
+        zero = np.zeros_like(ex)
+        for axis in (
+            np.stack([zero, -ez, ey], axis=1),
+            np.stack([ez, zero, -ex], axis=1),
+            np.stack([-ey, ex, zero], axis=1),
+        ):
             axis_len_sq = np.einsum("ij,ij->i", axis, axis)
             proj = np.einsum("mkj,mj->mk", verts, axis)
             axis_radius = np.abs(axis) @ box_half_size
