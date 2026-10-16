@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import logging
-
 import numpy as np
+import pytest
 
 from core.model import CellState, code_depth
 from core.octree import build_voxel_model, make_cubic_bbox
@@ -24,7 +23,7 @@ def test_single_triangle_yields_shell_cells() -> None:
         assert cell.facet_indices is not None
 
 
-def test_root_always_splits_at_least_once() -> None:
+def test_root_confirmed_without_splitting_when_voxel_size_covers_bbox() -> None:
     bbox_min = np.array([0.0, 0.0, 0.0])
     bbox_max = np.array([2.0, 2.0, 2.0])
     triangle = np.array([[0.5, 0.5, 0.5], [1.5, 0.5, 0.5], [0.5, 1.5, 0.5]])
@@ -32,10 +31,10 @@ def test_root_always_splits_at_least_once() -> None:
 
     model = build_voxel_model(bbox_min, bbox_max, facets, voxel_size=100.0)
 
-    assert model.shell_count >= 1
-    # ルート(depth 0)そのものではなく、必ず分割された子であること
-    for cell in model.get_shell_cells():
-        assert cell.depth >= 1
+    # voxel_sizeがbbox全体を覆うため、分割せずルート(depth 0)自体が確定する
+    assert model.shell_count == 1
+    cell = model.get_shell_cells()[0]
+    assert cell.depth == 0
 
 
 def test_smaller_voxel_size_yields_smaller_cells() -> None:
@@ -52,20 +51,14 @@ def test_smaller_voxel_size_yields_smaller_cells() -> None:
     assert fine_max_size < coarse_size.mean()
 
 
-def test_max_depth_forces_cell_and_logs_warning(caplog) -> None:
+def test_target_depth_exceeding_max_depth_raises() -> None:
     bbox_min = np.array([0.0, 0.0, 0.0])
     bbox_max = np.array([8.0, 8.0, 8.0])
     triangle = np.array([[0.0, 0.0, 0.0], [8.0, 8.0, 0.0], [0.0, 8.0, 8.0]])
     facets = np.array([triangle])
 
-    with caplog.at_level(logging.WARNING):
-        model = build_voxel_model(bbox_min, bbox_max, facets, voxel_size=1e-6, max_depth=2)
-
-    assert model.shell_count > 0
-    assert any("MAX_OCTREE_DEPTH" in record.message for record in caplog.records)
-    # 強制確定されたセルは max_depth で止まっている
-    for cell in model.get_shell_cells():
-        assert cell.depth <= 2
+    with pytest.raises(ValueError, match="MAX_OCTREE_DEPTH"):
+        build_voxel_model(bbox_min, bbox_max, facets, voxel_size=1e-6, max_depth=2)
 
 
 def test_make_cubic_bbox_expands_to_longest_edge_centered() -> None:

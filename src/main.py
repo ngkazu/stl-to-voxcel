@@ -8,7 +8,7 @@ import sys
 import numpy as np
 
 from core.export import export_voxel_stl
-from core.octree import build_voxel_model
+from core.octree import build_voxel_model, plan_octree
 from core.shrink import shrink_model
 from core.solid_fill import fill_solid
 from core.stl_loader import load_stl
@@ -66,6 +66,12 @@ def main(argv: list[str] | None = None) -> int:
     facets, bbox_min, bbox_max = load_stl(args.stl_path)
     print(f"facets: {len(facets)}")
     print(f"bbox: {bbox_min.tolist()} - {bbox_max.tolist()}")
+
+    # 8分木を実際に回す前にtarget_depthを確認する（facet走査を伴わない軽量処理）
+    target_depth, _, _ = plan_octree(
+        bbox_min, bbox_max, args.voxel_size, cubic_root=args.cubic_root
+    )
+    print(f"target_depth: {target_depth}")
 
     # 8分木でVoxelModel構築（SHELLセル）
     model = build_voxel_model(

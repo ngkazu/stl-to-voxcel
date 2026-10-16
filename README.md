@@ -6,15 +6,19 @@ octree (8-way) subdivision, and visualize the result with PyVista.
 ## What it does
 
 1. Load an STL file and compute its bounding box.
-2. Recursively split the bounding box into 8 octants (octree).
-3. For each octant, test which STL facets overlap it (SAT-based triangle-box overlap test).
+2. Before doing any work, compute how many times the root box needs to be halved
+   (`target_depth`) for its edge length to reach `--voxel-size` (`core.octree.plan_octree` /
+   `compute_target_depth`). With `--cubic-root`, the root is additionally resized to
+   `voxel_size * 2**target_depth` (same center) so the final cell size matches
+   `--voxel-size` *exactly* (not just "below or equal").
+3. Recursively split the bounding box into 8 octants (octree), testing which STL facets
+   overlap each octant (SAT-based triangle-box overlap test).
    - No overlapping facets -> discard the octant.
-   - Overlapping facets and the octant's average edge length is below `--voxel-size`
-     -> accept it as a final Voxel.
-   - Overlapping facets but still above `--voxel-size` -> split it further.
-4. A safety limit (`MAX_OCTREE_DEPTH` in `src/core/octree.py`) forces a leaf to be
-   accepted even if the size threshold was not reached, to avoid runaway recursion
-   from a too-small `--voxel-size`.
+   - Overlapping facets and the octant has reached `target_depth` -> accept it as a final Voxel.
+   - Overlapping facets but not yet at `target_depth` -> split it further.
+4. If `target_depth` exceeds the safety limit `MAX_OCTREE_DEPTH` (in `src/core/octree.py`),
+   `build_voxel_model` raises `ValueError` immediately (before any traversal) instead of
+   silently forcing an oversized cell — increase `--voxel-size` in that case.
 5. Show the accepted Voxels (and optionally the original mesh) in a PyVista window.
 
 This produces a *shell* voxelization (only voxels touching the STL surface). By default
@@ -38,7 +42,7 @@ stl-to-voxcel/
       model.py            # Data structures: Cell, CellState, VoxelModel (locational code)
       stl_loader.py       # STL loading (numpy-stl) + degenerate-facet filtering
       geometry.py         # Triangle-box overlap test, point-to-mesh distance (KD-tree), sweep distance
-      octree.py           # Octree subdivision -> VoxelModel (SHELL cells)
+      octree.py           # Octree subdivision -> VoxelModel (SHELL cells); plan_octree computes target_depth upfront
       solid_fill.py       # Interior fill via flood-fill + shell-crossing parity (INSIDE cells)
       shrink.py           # Shrink SHELL outer faces to the STL surface (greedy-merged faces + sweep distance)
       export.py           # Export SHELL+INSIDE cell faces as an STL file (all/boundary/merged modes)
@@ -110,8 +114,10 @@ pytest tests -v               # Run tests
 
 ## Known limitations
 
-- Without `--cubic-root`, the average-edge-length stopping criterion can give
-  anisotropic resolution for very non-cubic bounding boxes.
+- Without `--cubic-root`, the root box is not resized to a voxel_size-aligned length, so
+  the resulting (still uniform-per-axis) cell size can be smaller than `--voxel-size` and
+  anisotropic for non-cubic bounding boxes. Use `--cubic-root` to get cells whose size
+  exactly matches `--voxel-size`.
 - Solid fill (default) requires at least one cell of empty space around the shell to
   detect "outside" (handled internally via automatic 1-cell padding) and assumes
   each nested shell layer is a properly closed (watertight) surface; a non-watertight
